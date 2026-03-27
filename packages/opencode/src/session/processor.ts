@@ -354,7 +354,11 @@ export namespace SessionProcessor {
           } catch (e: any) {
             log.error("process", {
               error: e,
-              stack: JSON.stringify(e.stack),
+              stack: e instanceof Error ? e.stack : undefined,
+              providerID: input.model.providerID,
+              modelID: input.model.id,
+              sessionID: input.sessionID,
+              agent: input.assistantMessage.agent,
             })
             const error = MessageV2.fromError(e, { providerID: input.model.providerID, aborted: input.abort.aborted })
             if (MessageV2.ContextOverflowError.isInstance(error)) {

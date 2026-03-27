@@ -12,6 +12,7 @@ import { useSync } from "@tui/context/sync"
 import { MessageID, PartID } from "@/session/schema"
 import { createStore, produce } from "solid-js/store"
 import { useKeybind } from "@tui/context/keybind"
+import { Log } from "@/util/log"
 import { usePromptHistory, type PromptInfo } from "./history"
 import { assign } from "./part"
 import { usePromptStash } from "./stash"
@@ -563,10 +564,10 @@ export function Prompt(props: PromptProps) {
       })
 
       if (res.error) {
-        console.log("Creating a session failed:", res.error)
+        Log.Default.error("session creation failed", { error: res.error })
 
         toast.show({
-          message: "Creating a session failed. Open console for more details.",
+          message: "Creating a session failed",
           variant: "error",
         })
 

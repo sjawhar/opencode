@@ -989,8 +989,29 @@ export namespace MessageV2 {
           },
           { cause: e },
         ).toObject()
+      case e instanceof DOMException && e.name === "TimeoutError":
+        return new MessageV2.APIError(
+          {
+            message: "Request timed out",
+            isRetryable: true,
+          },
+          { cause: e },
+        ).toObject()
+      case e instanceof Error && "code" in e && typeof (e as SystemError).code === "string" && ["ECONNREFUSED", "ENOTFOUND", "ETIMEDOUT", "EPIPE", "ECONNABORTED", "EHOSTUNREACH"].includes((e as SystemError).code):
+        return new MessageV2.APIError(
+          {
+            message: `Network error: ${(e as SystemError).message}`,
+            isRetryable: true,
+            metadata: {
+              code: (e as SystemError).code ?? "",
+              syscall: (e as SystemError).syscall ?? "",
+              message: (e as SystemError).message ?? "",
+            },
+          },
+          { cause: e },
+        ).toObject()
       case e instanceof Error:
-        return new NamedError.Unknown({ message: e instanceof Error ? e.message : String(e) }, { cause: e }).toObject()
+        return new NamedError.Unknown({ message: e.message }, { cause: e }).toObject()
       default:
         try {
           const parsed = ProviderError.parseStreamError(e)

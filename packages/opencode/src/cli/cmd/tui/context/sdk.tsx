@@ -2,6 +2,7 @@ import { createOpencodeClient, type Event } from "@opencode-ai/sdk/v2"
 import { createSimpleContext } from "./helper"
 import { createGlobalEmitter } from "@solid-primitives/event-bus"
 import { batch, onCleanup, onMount } from "solid-js"
+import { Log } from "@/util/log"
 
 export type EventSource = {
   on: (handler: (event: Event) => void) => () => void
@@ -87,7 +88,12 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
           if (timer) clearTimeout(timer)
           if (queue.length > 0) flush()
         }
-      })().catch(() => {})
+      })().catch((e) => {
+        if (abort.signal.aborted || ctrl.signal.aborted) return
+        Log.Default.warn("event stream error, reconnecting", {
+          error: e instanceof Error ? e.message : String(e),
+        })
+      })
     }
 
     onMount(() => {
