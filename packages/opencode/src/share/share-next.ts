@@ -63,51 +63,54 @@ export namespace ShareNext {
 
   const disabled = process.env["OPENCODE_DISABLE_SHARE"] === "true" || process.env["OPENCODE_DISABLE_SHARE"] === "1"
 
-  export async function init() {
-    if (disabled) return
-    Bus.subscribe(Session.Event.Updated, async (evt) => {
-      const session = await Session.get(evt.properties.sessionID)
+  export function init(): () => void {
+    if (disabled) return () => {}
+    const unsubs = [
+      Bus.subscribe(Session.Event.Updated, async (evt) => {
+        const session = await Session.get(evt.properties.sessionID)
 
-      await sync(session.id, [
-        {
-          type: "session",
-          data: session,
-        },
-      ])
-    })
-    Bus.subscribe(MessageV2.Event.Updated, async (evt) => {
-      const info = evt.properties.info
-      await sync(info.sessionID, [
-        {
-          type: "message",
-          data: evt.properties.info,
-        },
-      ])
-      if (info.role === "user") {
-        await sync(info.sessionID, [
+        await sync(session.id, [
           {
-            type: "model",
-            data: [await Provider.getModel(info.model.providerID, info.model.modelID).then((m) => m)],
+            type: "session",
+            data: session,
           },
         ])
-      }
-    })
-    Bus.subscribe(MessageV2.Event.PartUpdated, async (evt) => {
-      await sync(evt.properties.part.sessionID, [
-        {
-          type: "part",
-          data: evt.properties.part,
-        },
-      ])
-    })
-    Bus.subscribe(Session.Event.Diff, async (evt) => {
-      await sync(evt.properties.sessionID, [
-        {
-          type: "session_diff",
-          data: evt.properties.diff,
-        },
-      ])
-    })
+      }),
+      Bus.subscribe(MessageV2.Event.Updated, async (evt) => {
+        const info = evt.properties.info
+        await sync(info.sessionID, [
+          {
+            type: "message",
+            data: evt.properties.info,
+          },
+        ])
+        if (info.role === "user") {
+          await sync(info.sessionID, [
+            {
+              type: "model",
+              data: [await Provider.getModel(info.model.providerID, info.model.modelID).then((m) => m)],
+            },
+          ])
+        }
+      }),
+      Bus.subscribe(MessageV2.Event.PartUpdated, async (evt) => {
+        await sync(evt.properties.part.sessionID, [
+          {
+            type: "part",
+            data: evt.properties.part,
+          },
+        ])
+      }),
+      Bus.subscribe(Session.Event.Diff, async (evt) => {
+        await sync(evt.properties.sessionID, [
+          {
+            type: "session_diff",
+            data: evt.properties.diff,
+          },
+        ])
+      }),
+    ]
+    return () => unsubs.forEach((fn) => fn())
   }
 
   export async function create(sessionID: SessionID) {

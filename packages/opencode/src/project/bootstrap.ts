@@ -11,11 +11,12 @@ import { Command } from "../command"
 import { Instance } from "./instance"
 import { Log } from "@/util/log"
 import { ShareNext } from "@/share/share-next"
+import { registerDisposer } from "@/effect/instance-registry"
 
 export async function InstanceBootstrap() {
   Log.Default.info("bootstrapping", { directory: Instance.directory })
   await Plugin.init()
-  ShareNext.init()
+  const unsub = ShareNext.init()
   Format.init()
   await LSP.init()
   File.init()
@@ -23,9 +24,16 @@ export async function InstanceBootstrap() {
   Vcs.init()
   Snapshot.init()
 
-  Bus.subscribe(Command.Event.Executed, async (payload) => {
+  const off = Bus.subscribe(Command.Event.Executed, async (payload) => {
     if (payload.properties.name === Command.Default.INIT) {
       Project.setInitialized(Instance.project.id)
     }
+  })
+
+  const dir = Instance.directory
+  registerDisposer(async (target) => {
+    if (target !== dir) return
+    unsub()
+    off()
   })
 }
