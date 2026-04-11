@@ -265,6 +265,116 @@ export function project<Def extends Definition>(
   return [def, func as ProjectorFunc]
 }
 
+type Sync<T> = T extends Promise<any> ? never : T
+const sessionTypes = new Set(["session.created", "session.updated", "session.deleted"])
+
+function root(type: string, agg: string): string | undefined {
+  if (sessionTypes.has(type)) return
+  const version = versions.get(type)
+  if (!version) return
+  const def = registry.get(versionedType(type, version))
+  if (!def) return
+  if (def.aggregate !== "sessionID") return
+  return Database.sessionRoot(agg)
+}
+
+function seq(type: string, agg: string) {
+  const id = root(type, agg)
+  if (id) {
+    return Database.session(id)
+      .select({ seq: EventSequenceTable.seq })
+      .from(EventSequenceTable)
+      .where(eq(EventSequenceTable.aggregate_id, agg))
+      .get()
+  }
+  return Database.use((db) =>
+    db
+      .select({ seq: EventSequenceTable.seq })
+      .from(EventSequenceTable)
+      .where(eq(EventSequenceTable.aggregate_id, agg))
+      .get(),
+  )
+}
+
+function transact<T>(
+  type: string,
+  agg: string,
+  cb: (tx: Database.TxOrDb) => Sync<T>,
+  options?: { behavior?: "deferred" | "immediate" | "exclusive" },
+): Sync<T> {
+  const id = root(type, agg)
+  if (id) {
+    return Database.session(id).transaction((tx) => cb(tx), { behavior: options?.behavior }) as Sync<T>
+  }
+  return Database.transaction(cb, options)
+}
+
+function apply<Def extends Definition>(
+  tx: Database.TxOrDb,
+  projector: ProjectorFunc,
+  def: Def,
+  event: Event<Def>,
+  options?: { ownerID?: string },
+) {
+  projector(tx, event.data, event)
+
+  if (Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) {
+    tx.insert(EventSequenceTable)
+      .values({
+        aggregate_id: event.aggregateID,
+        seq: event.seq,
+        owner_id: options?.ownerID,
+      })
+      .onConflictDoUpdate({
+        target: EventSequenceTable.aggregate_id,
+        set: { seq: event.seq },
+      })
+      .run()
+    tx.insert(EventTable)
+      .values({
+        id: event.id,
+        seq: event.seq,
+        aggregate_id: event.aggregateID,
+        type: versionedType(def.type, def.version),
+        data: event.data as Record<string, unknown>,
+      })
+      .run()
+  }
+}
+
+function emit<Def extends Definition>(
+  def: Def,
+  event: Event<Def>,
+  options: { publish: boolean; context?: PublishContext },
+) {
+  return () => {
+    if (!options?.publish) return
+    if (!options.context?.instance) {
+      throw new Error("SyncEvent.process: publish requires instance context")
+    }
+    const result = convertEvent(def.type, event.data)
+    const publish = (data: unknown) => ProjectBus.publish(def, data as Properties<Def>, { id: event.id })
+    if (result instanceof Promise) {
+      void result.then(publish)
+    } else {
+      void publish(result)
+    }
+
+    GlobalBus.emit("event", {
+      directory: options.context.instance.directory,
+      project: options.context.instance.project.id,
+      workspace: options.context.workspace,
+      payload: {
+        type: "sync",
+        syncEvent: {
+          type: versionedType(def.type, def.version),
+          ...event,
+        },
+      },
+    })
+  }
+}
+
 function process<Def extends Definition>(
   def: Def,
   event: Event<Def>,
@@ -279,61 +389,10 @@ function process<Def extends Definition>(
     throw new Error(`Projector not found for event: ${def.type}`)
   }
 
-  Database.transaction((tx) => {
-    projector(tx, event.data, event)
+  // idempotent: need to ignore any events already logged
 
-    if (Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) {
-      tx.insert(EventSequenceTable)
-        .values({
-          aggregate_id: event.aggregateID,
-          seq: event.seq,
-          owner_id: options?.ownerID,
-        })
-        .onConflictDoUpdate({
-          target: EventSequenceTable.aggregate_id,
-          set: { seq: event.seq },
-        })
-        .run()
-      tx.insert(EventTable)
-        .values({
-          id: event.id,
-          seq: event.seq,
-          aggregate_id: event.aggregateID,
-          type: versionedType(def.type, def.version),
-          data: event.data as Record<string, unknown>,
-        })
-        .run()
-    }
-
-    Database.effect(() => {
-      if (options?.publish) {
-        if (!options.context?.instance) {
-          throw new Error("SyncEvent.process: publish requires instance context")
-        }
-
-        const result = convertEvent(def.type, event.data)
-        const publish = (data: unknown) => ProjectBus.publish(def, data as Properties<Def>, { id: event.id })
-        if (result instanceof Promise) {
-          void result.then(publish)
-        } else {
-          void publish(result)
-        }
-
-        GlobalBus.emit("event", {
-          directory: options.context.instance.directory,
-          project: options.context.instance.project.id,
-          workspace: options.context.workspace,
-          payload: {
-            type: "sync",
-            syncEvent: {
-              type: versionedType(def.type, def.version),
-              ...event,
-            },
-          },
-        })
-      }
-    })
-  })
+  transact(def.type, event.aggregateID, (tx) => apply(tx, projector, def, event, { ownerID: options?.ownerID }))
+  Database.effect(emit(def, event, options))
 }
 
 export function replay(event: SerializedEvent, options?: { publish: boolean; ownerID?: string }) {

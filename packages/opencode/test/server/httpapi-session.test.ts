@@ -266,25 +266,23 @@ describe("session HttpApi", () => {
                 time: { created: DateTime.makeUnsafe(1) },
                 content: [],
               })
-              Database.use((db) =>
-                db
-                  .insert(SessionMessageTable)
-                  .values([
-                    {
-                      id: message.id,
-                      session_id: parent.id,
-                      type: message.type,
-                      time_created: 1,
-                      data: {
-                        time: { created: 1 },
-                        agent: message.agent,
-                        model: message.model,
-                        content: message.content,
-                      } as NonNullable<(typeof SessionMessageTable.$inferInsert)["data"]>,
-                    },
-                  ])
-                  .run(),
-              )
+              Database.resolveSession(parent.id)
+                .insert(SessionMessageTable)
+                .values([
+                  {
+                    id: message.id,
+                    session_id: parent.id,
+                    type: message.type,
+                    time_created: 1,
+                    data: {
+                      time: { created: 1 },
+                      agent: message.agent,
+                      model: message.model,
+                      content: message.content,
+                    } as NonNullable<(typeof SessionMessageTable.$inferInsert)["data"]>,
+                  },
+                ])
+                .run()
             },
           }),
         )
