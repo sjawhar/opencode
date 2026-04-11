@@ -95,10 +95,17 @@ const part = (row: typeof PartTable.$inferSelect) =>
 const older = (row: Cursor) =>
   or(lt(MessageTable.time_created, row.time), and(eq(MessageTable.time_created, row.time), lt(MessageTable.id, row.id)))
 
+const messageSession = new Map<MessageID, SessionID>()
+
+export function rememberSession(messageID: MessageID, sessionID: SessionID) {
+  messageSession.set(messageID, sessionID)
+}
+
 function hydrate(db: Database.Interface["db"], rows: (typeof MessageTable.$inferSelect)[]) {
   const ids = rows.map((row) => row.id)
   const partByMessage = new Map<string, Part[]>()
   return Effect.gen(function* () {
+    for (const row of rows) rememberSession(row.id, row.session_id)
     if (ids.length > 0) {
       const partRows = yield* db
         .select()
@@ -427,7 +434,8 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
   limit: number
   before?: string
 }) {
-  const { db } = yield* Database.Service
+  const database = yield* Database.Service
+  const db = yield* database.resolveSession(input.sessionID)
   const before = input.before ? cursor.decode(input.before) : undefined
   const where = before
     ? and(eq(MessageTable.session_id, input.sessionID), older(before))
@@ -441,7 +449,7 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
     .all()
     .pipe(Effect.orDie)
   if (rows.length === 0) {
-    const row = yield* db
+    const row = yield* database.db
       .select({ id: SessionTable.id })
       .from(SessionTable)
       .where(eq(SessionTable.id, input.sessionID))
@@ -489,9 +497,43 @@ export function stream(sessionID: SessionID) {
   })
 }
 
-export function parts(messageID: MessageID) {
+export function parts(messageID: MessageID, sessionID?: SessionID) {
   return Effect.gen(function* () {
-    const { db } = yield* Database.Service
+    const database = yield* Database.Service
+    if (sessionID) {
+      rememberSession(messageID, sessionID)
+      return yield* readParts(yield* database.resolveSession(sessionID), messageID)
+    }
+
+    const cached = messageSession.get(messageID)
+    if (cached) {
+      const rows = yield* readParts(yield* database.resolveSession(cached), messageID)
+      if (rows.length > 0) return rows
+      messageSession.delete(messageID)
+    }
+
+    const globalRows = yield* readParts(database.db, messageID)
+    if (globalRows.length > 0) return globalRows
+
+    const sessions = yield* database.db
+      .select({ id: SessionTable.id })
+      .from(SessionTable)
+      .orderBy(desc(SessionTable.time_created), desc(SessionTable.id))
+      .all()
+      .pipe(Effect.orDie)
+    for (const session of sessions) {
+      const rows = yield* readParts(yield* database.resolveSession(session.id), messageID)
+      if (rows.length > 0) {
+        rememberSession(messageID, session.id)
+        return rows
+      }
+    }
+    return []
+  })
+}
+
+function readParts(db: Database.Interface["db"], messageID: MessageID) {
+  return Effect.gen(function* () {
     const rows = yield* db
       .select()
       .from(PartTable)
@@ -504,7 +546,8 @@ export function parts(messageID: MessageID) {
 }
 
 export const get = Effect.fn("MessageV2.get")(function* (input: { sessionID: SessionID; messageID: MessageID }) {
-  const { db } = yield* Database.Service
+  const database = yield* Database.Service
+  const db = yield* database.resolveSession(input.sessionID)
   const row = yield* db
     .select()
     .from(MessageTable)
@@ -514,7 +557,7 @@ export const get = Effect.fn("MessageV2.get")(function* (input: { sessionID: Ses
   if (!row) return yield* new NotFoundError({ message: `Message not found: ${input.messageID}` })
   return {
     info: info(row),
-    parts: yield* parts(input.messageID),
+    parts: yield* parts(input.messageID, input.sessionID),
   }
 })
 

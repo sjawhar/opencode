@@ -5,7 +5,8 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { eq } from "drizzle-orm"
 import { EventV2Bridge } from "@/event-v2-bridge"
-import { expect } from "bun:test"
+import { FetchHttpClient } from "effect/unstable/http"
+import { afterEach, beforeEach, expect } from "bun:test"
 import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer } from "effect"
 import path from "path"
 import { fileURLToPath } from "url"
@@ -66,6 +67,17 @@ const summary = Layer.succeed(
     computeDiff: () => Effect.succeed([]),
   }),
 )
+
+const originalPure = process.env.OPENCODE_PURE
+
+beforeEach(() => {
+  process.env.OPENCODE_PURE = "1"
+})
+
+afterEach(() => {
+  if (originalPure === undefined) delete process.env.OPENCODE_PURE
+  else process.env.OPENCODE_PURE = originalPure
+})
 
 const ref = {
   providerID: ProviderV2.ID.make("test"),

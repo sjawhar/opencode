@@ -269,7 +269,24 @@ describe("DatabaseMigration", () => {
         yield* db.run(sql`DELETE FROM migration WHERE id = ${simplifySessionInputMigration.id}`)
         yield* DatabaseMigration.applyOnly(db, [simplifySessionInputMigration])
 
-        const database = Layer.succeed(Database.Service, { db })
+        const database = Layer.succeed(
+          Database.Service,
+          Database.Service.of({
+            db,
+            sessionDir: "",
+            monitor: Effect.succeed({ wal_bytes: 0, metrics: {} }),
+            stats: Effect.succeed({ write: 0, retry: 0, exhausted: 0 }),
+            transaction: (callback) => db.transaction((tx) => callback(tx)),
+            writeWithBusyRetry: (effect) => effect,
+            session: () => Effect.succeed(db),
+            hasSession: () => Effect.succeed(false),
+            sessionRoot: () => Effect.succeed(undefined),
+            ensureShard: () => Effect.succeed(undefined),
+            resolveSession: () => Effect.succeed(db),
+            closeSession: () => Effect.void,
+            resetSwept: Effect.void,
+          }),
+        )
         yield* EventV2.Service.use((service) =>
           service.publish(SessionV1.Event.Updated, {
             sessionID: SessionSchema.ID.make("session"),

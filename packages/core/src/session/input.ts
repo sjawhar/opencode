@@ -5,6 +5,7 @@ import { DateTime, Effect, Schema } from "effect"
 import { Admitted, Delivery } from "@opencode-ai/schema/session-input"
 import type { Database } from "../database/database"
 import type { EventV2 } from "../event"
+import { EventSequenceTable } from "../event/sql"
 import { SessionEvent } from "./event"
 import { SessionMessage } from "./message"
 import { Prompt } from "./prompt"
@@ -80,6 +81,38 @@ export const admit = Effect.fn("SessionInput.admit")(function* (
     )
 })
 
+export const mirrorAdmitted = Effect.fn("SessionInput.mirrorAdmitted")(function* (
+  db: DatabaseService,
+  input: Admitted,
+) {
+  yield* db
+    .insert(SessionInputTable)
+    .values({
+      id: input.id,
+      session_id: input.sessionID,
+      admitted_seq: input.admittedSeq,
+      prompt: encodePrompt(input.prompt),
+      delivery: input.delivery,
+      ...(input.promotedSeq === undefined ? {} : { promoted_seq: input.promotedSeq }),
+      time_created: DateTime.toEpochMillis(input.timeCreated),
+    })
+    .onConflictDoNothing()
+    .run()
+    .pipe(Effect.orDie)
+})
+
+export const latestSeq = Effect.fn("SessionInput.latestSeq")(function* (
+  db: DatabaseService,
+  sessionID: SessionSchema.ID,
+) {
+  const row = yield* db
+    .select({ seq: EventSequenceTable.seq })
+    .from(EventSequenceTable)
+    .where(eq(EventSequenceTable.aggregate_id, sessionID))
+    .get()
+    .pipe(Effect.orDie)
+  return row?.seq ?? -1
+})
 export const projectAdmitted = Effect.fn("SessionInput.projectAdmitted")(function* (
   db: DatabaseService,
   input: {

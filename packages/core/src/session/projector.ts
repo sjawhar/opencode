@@ -106,7 +106,11 @@ function applyUsage(
     })
     .where(eq(SessionTable.id, sessionID))
     .run()
-    .pipe(Effect.orDie)
+    // Best-effort: this rolls up cost/tokens onto the GLOBAL session row. After event
+    // writes moved to the shard this is the only global write left on the turn-cleanup
+    // path; a lock here must NOT abort cleanup (that stranded the turn -> idle stall).
+    // The event data is already durable in the shard; usage is a soft aggregate.
+    .pipe(Effect.ignore)
 }
 
 function run(db: DatabaseService, event: SessionEvent.Event) {
@@ -211,7 +215,10 @@ function insertMessage(db: DatabaseService, event: SessionEvent.Event, message: 
 const layer = Layer.effectDiscard(
   Effect.gen(function* () {
     const events = yield* EventV2.Service
-    const { db } = yield* Database.Service
+    const database = yield* Database.Service
+    const { db } = database
+    const sessionDb = (sessionID: string) =>
+      Database.path() === ":memory:" ? Effect.succeed(db) : database.resolveSession(sessionID)
     yield* events.project(SessionV1.Event.Created, (event) =>
       Effect.gen(function* () {
         const stored = yield* db
@@ -253,7 +260,8 @@ const layer = Layer.effectDiscard(
           .where(eq(SessionTable.id, event.data.sessionID))
           .run()
           .pipe(Effect.orDie)
-        yield* SessionContextEpoch.reset(db, event.data.sessionID)
+        const target = yield* sessionDb(event.data.sessionID)
+        yield* SessionContextEpoch.reset(target, event.data.sessionID)
       }),
     )
     yield* events.project(SessionV1.Event.Deleted, (event) =>
@@ -261,11 +269,12 @@ const layer = Layer.effectDiscard(
     )
     yield* events.project(SessionV1.Event.MessageUpdated, (event) =>
       Effect.gen(function* () {
+        const target = yield* sessionDb(event.data.sessionID)
         const time_created = event.data.info.time.created
         const id = event.data.info.id
         const sessionID = event.data.info.sessionID
         const data = messageData(event.data.info)
-        yield* db
+        yield* target
           .insert(MessageTable)
           .values({ id, session_id: sessionID, time_created, data })
           .onConflictDoUpdate({ target: MessageTable.id, set: { data } })
@@ -275,7 +284,8 @@ const layer = Layer.effectDiscard(
     )
     yield* events.project(SessionV1.Event.MessageRemoved, (event) =>
       Effect.gen(function* () {
-        const rows = yield* db
+        const target = yield* sessionDb(event.data.sessionID)
+        const rows = yield* target
           .select()
           .from(PartTable)
           .where(and(eq(PartTable.message_id, event.data.messageID), eq(PartTable.session_id, event.data.sessionID)))
@@ -285,7 +295,7 @@ const layer = Layer.effectDiscard(
           const previous = usage(row.data)
           if (previous) yield* applyUsage(db, event.data.sessionID, previous, -1)
         }
-        yield* db
+        yield* target
           .delete(MessageTable)
           .where(and(eq(MessageTable.id, event.data.messageID), eq(MessageTable.session_id, event.data.sessionID)))
           .run()
@@ -294,7 +304,8 @@ const layer = Layer.effectDiscard(
     )
     yield* events.project(SessionV1.Event.PartRemoved, (event) =>
       Effect.gen(function* () {
-        const row = yield* db
+        const target = yield* sessionDb(event.data.sessionID)
+        const row = yield* target
           .select()
           .from(PartTable)
           .where(and(eq(PartTable.id, event.data.partID), eq(PartTable.session_id, event.data.sessionID)))
@@ -302,7 +313,7 @@ const layer = Layer.effectDiscard(
           .pipe(Effect.orDie)
         const previous = row && usage(row.data)
         if (previous) yield* applyUsage(db, event.data.sessionID, previous, -1)
-        yield* db
+        yield* target
           .delete(PartTable)
           .where(and(eq(PartTable.id, event.data.partID), eq(PartTable.session_id, event.data.sessionID)))
           .run()
@@ -311,12 +322,13 @@ const layer = Layer.effectDiscard(
     )
     yield* events.project(SessionV1.Event.PartUpdated, (event) =>
       Effect.gen(function* () {
+        const target = yield* sessionDb(event.data.sessionID)
         const id = event.data.part.id
         const messageID = event.data.part.messageID
         const sessionID = event.data.part.sessionID
         const data = partData(event.data.part)
-        const row = yield* db.select().from(PartTable).where(eq(PartTable.id, id)).get().pipe(Effect.orDie)
-        yield* db
+        const row = yield* target.select().from(PartTable).where(eq(PartTable.id, id)).get().pipe(Effect.orDie)
+        yield* target
           .insert(PartTable)
           .values({ id, message_id: messageID, session_id: sessionID, time_created: event.data.time, data })
           .onConflictDoUpdate({ target: PartTable.id, set: { data } })
@@ -328,14 +340,18 @@ const layer = Layer.effectDiscard(
         if (next) yield* applyUsage(db, sessionID, next)
       }),
     )
-    yield* events.project(SessionEvent.AgentSwitched, (event) =>
-      db
-        .update(SessionTable)
-        .set({ agent: event.data.agent, time_updated: DateTime.toEpochMillis(event.data.timestamp) })
-        .where(eq(SessionTable.id, event.data.sessionID))
-        .run()
-        .pipe(Effect.orDie, Effect.andThen(run(db, event))),
-    )
+    yield* events.project(SessionEvent.AgentSwitched, (event) => {
+      return Effect.gen(function* () {
+        const target = yield* sessionDb(event.data.sessionID)
+        yield* db
+          .update(SessionTable)
+          .set({ agent: event.data.agent, time_updated: DateTime.toEpochMillis(event.data.timestamp) })
+          .where(eq(SessionTable.id, event.data.sessionID))
+          .run()
+          .pipe(Effect.orDie)
+        yield* run(target, event)
+      })
+    })
     yield* events.project(SessionEvent.ModelSwitched, (event) =>
       Effect.gen(function* () {
         yield* db
@@ -344,27 +360,39 @@ const layer = Layer.effectDiscard(
           .where(eq(SessionTable.id, event.data.sessionID))
           .run()
           .pipe(Effect.orDie)
-        yield* run(db, event)
+        if (event.durable === undefined) return yield* Effect.die("Durable Session event is missing aggregate sequence")
+        const target = yield* sessionDb(event.data.sessionID)
+        yield* run(target, event)
       }),
     )
     yield* events.project(SessionEvent.Prompted, (event) =>
       Effect.gen(function* () {
+        const target = yield* sessionDb(event.data.sessionID)
+        const messageID = event.data.messageID
+        const existing = yield* target
+          .select({ id: SessionMessageTable.id })
+           .from(SessionMessageTable)
+           .where(eq(SessionMessageTable.id, messageID))
+           .get()
+          .pipe(Effect.orDie)
+        if (existing) return yield* Effect.die(new SessionInput.LifecycleConflict({ id: messageID }))
         if (event.durable === undefined) return yield* Effect.die("Durable Session event is missing aggregate sequence")
-        yield* SessionInput.projectPrompted(db, {
-          id: event.data.messageID,
+        yield* run(target, event)
+        yield* SessionInput.projectPrompted(target, {
+          id: messageID,
           sessionID: event.data.sessionID,
           prompt: event.data.prompt,
           delivery: event.data.delivery,
           timeCreated: event.data.timestamp,
           promotedSeq: event.durable.seq,
         })
-        yield* run(db, event)
       }),
     )
     yield* events.project(SessionEvent.PromptAdmitted, (event) =>
       Effect.gen(function* () {
         if (event.durable === undefined) return yield* Effect.die("Durable Session event is missing aggregate sequence")
-        yield* SessionInput.projectAdmitted(db, {
+        const target = yield* sessionDb(event.data.sessionID)
+        yield* SessionInput.projectAdmitted(target, {
           admittedSeq: event.durable.seq,
           id: event.data.messageID,
           sessionID: event.data.sessionID,
@@ -374,25 +402,30 @@ const layer = Layer.effectDiscard(
         })
       }),
     )
-    yield* events.project(SessionEvent.ContextUpdated, (event) => run(db, event))
-    yield* events.project(SessionEvent.Synthetic, (event) => run(db, event))
-    yield* events.project(SessionEvent.Shell.Started, (event) => run(db, event))
-    yield* events.project(SessionEvent.Shell.Ended, (event) => run(db, event))
-    yield* events.project(SessionEvent.Step.Started, (event) => run(db, event))
-    yield* events.project(SessionEvent.Step.Ended, (event) => run(db, event))
-    yield* events.project(SessionEvent.Step.Failed, (event) => run(db, event))
-    yield* events.project(SessionEvent.Text.Started, (event) => run(db, event))
-    yield* events.project(SessionEvent.Text.Ended, (event) => run(db, event))
-    yield* events.project(SessionEvent.Tool.Input.Started, (event) => run(db, event))
-    yield* events.project(SessionEvent.Tool.Input.Ended, (event) => run(db, event))
-    yield* events.project(SessionEvent.Tool.Called, (event) => run(db, event))
-    yield* events.project(SessionEvent.Tool.Progress, (event) => run(db, event))
-    yield* events.project(SessionEvent.Tool.Success, (event) => run(db, event))
-    yield* events.project(SessionEvent.Tool.Failed, (event) => run(db, event))
-    yield* events.project(SessionEvent.Reasoning.Started, (event) => run(db, event))
-    yield* events.project(SessionEvent.Reasoning.Ended, (event) => run(db, event))
+    const runSessionEvent = (event: SessionEvent.Event) =>
+      Effect.gen(function* () {
+        yield* run(yield* sessionDb(event.data.sessionID), event)
+      })
+    // TODO: Reconstruct context epoch replacement state during replay without adding replay state to every EventV2 payload.
+    yield* events.project(SessionEvent.ContextUpdated, runSessionEvent)
+    yield* events.project(SessionEvent.Synthetic, runSessionEvent)
+    yield* events.project(SessionEvent.Shell.Started, runSessionEvent)
+    yield* events.project(SessionEvent.Shell.Ended, runSessionEvent)
+    yield* events.project(SessionEvent.Step.Started, runSessionEvent)
+    yield* events.project(SessionEvent.Step.Ended, runSessionEvent)
+    yield* events.project(SessionEvent.Step.Failed, runSessionEvent)
+    yield* events.project(SessionEvent.Text.Started, runSessionEvent)
+    yield* events.project(SessionEvent.Text.Ended, runSessionEvent)
+    yield* events.project(SessionEvent.Tool.Input.Started, runSessionEvent)
+    yield* events.project(SessionEvent.Tool.Input.Ended, runSessionEvent)
+    yield* events.project(SessionEvent.Tool.Called, runSessionEvent)
+    yield* events.project(SessionEvent.Tool.Progress, runSessionEvent)
+    yield* events.project(SessionEvent.Tool.Success, runSessionEvent)
+    yield* events.project(SessionEvent.Tool.Failed, runSessionEvent)
+    yield* events.project(SessionEvent.Reasoning.Started, runSessionEvent)
+    yield* events.project(SessionEvent.Reasoning.Ended, runSessionEvent)
     // yield* events.project(SessionEvent.Retried, (event) => run(db, event))
-    yield* events.project(SessionEvent.Compaction.Ended, (event) => run(db, event))
+    yield* events.project(SessionEvent.Compaction.Ended, runSessionEvent)
     yield* events.project(SessionEvent.RevertEvent.Staged, (event) =>
       db
         .update(SessionTable)
@@ -414,7 +447,8 @@ const layer = Layer.effectDiscard(
     )
     yield* events.project(SessionEvent.RevertEvent.Committed, (event) =>
       Effect.gen(function* () {
-        const boundary = yield* db
+        const target = yield* sessionDb(event.data.sessionID)
+        const boundary = yield* target
           .select({ seq: SessionMessageTable.seq })
           .from(SessionMessageTable)
           .where(
@@ -426,14 +460,14 @@ const layer = Layer.effectDiscard(
           .get()
           .pipe(Effect.orDie)
         if (!boundary) return yield* Effect.die(`Revert boundary message not found: ${event.data.messageID}`)
-        yield* db
+        yield* target
           .delete(SessionMessageTable)
           .where(
             and(eq(SessionMessageTable.session_id, event.data.sessionID), gt(SessionMessageTable.seq, boundary.seq)),
           )
           .run()
           .pipe(Effect.orDie)
-        yield* db
+        yield* target
           .delete(SessionInputTable)
           .where(
             and(
@@ -449,7 +483,7 @@ const layer = Layer.effectDiscard(
           .where(eq(SessionTable.id, event.data.sessionID))
           .run()
           .pipe(Effect.orDie)
-        yield* SessionContextEpoch.reset(db, event.data.sessionID)
+        yield* SessionContextEpoch.reset(target, event.data.sessionID)
       }),
     )
   }),

@@ -60,7 +60,7 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Pr
 const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
-    const db = (yield* Database.Service).db
+    const { db, writeWithBusyRetry } = yield* Database.Service
 
     const create = Effect.fn("ProjectDirectories.create")(function* (input: CreateInput, tx?: Transaction) {
       const insert = (tx ?? db)
@@ -76,9 +76,8 @@ const layer = Layer.effect(
                 : isNotNull(ProjectDirectoryTable.strategy),
             })
           : insert.onConflictDoNothing()
-      return (
-        (yield* query.returning({ directory: ProjectDirectoryTable.directory }).get().pipe(Effect.orDie)) !== undefined
-      )
+      const runCreate = query.returning({ directory: ProjectDirectoryTable.directory }).get()
+      return (yield* (tx ? runCreate : writeWithBusyRetry(runCreate)).pipe(Effect.orDie)) !== undefined
     })
 
     const remove = Effect.fn("ProjectDirectories.remove")(function* (input: RemoveInput, tx?: Transaction) {

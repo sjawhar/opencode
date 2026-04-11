@@ -1,4 +1,6 @@
 import { describe, expect } from "bun:test"
+import { existsSync, unlinkSync } from "fs"
+import path from "path"
 import {
   LLMClient,
   LLMError,
@@ -59,6 +61,22 @@ import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Layer, Schema, Stream }
 import { asc, eq } from "drizzle-orm"
 import { testEffect } from "./lib/effect"
 
+const memoryDatabase = Database.layerFromPath(":memory:")
+const database = Layer.effect(
+  Database.Service,
+  Database.Service.pipe(
+    Effect.map((database) =>
+      Database.Service.of({
+        ...database,
+        session: () => Effect.succeed(database.db),
+        hasSession: () => Effect.succeed(false),
+        sessionRoot: () => Effect.succeed(undefined),
+        ensureShard: () => Effect.succeed(undefined),
+        resolveSession: () => Effect.succeed(database.db),
+      }),
+    ),
+  ),
+).pipe(Layer.provide(memoryDatabase))
 const requests: LLMRequest[] = []
 let response: LLMEvent[] = []
 let responses: LLMEvent[][] | undefined
@@ -226,6 +244,7 @@ const config = Layer.succeed(
   }),
 )
 const runnerLayer = AppNodeBuilder.build(SessionRunnerLLM.node, [
+  [Database.node, database],
   [Snapshot.node, Snapshot.noopLayer],
   [LayerNodePlatform.llmClient, client],
   [SessionRunnerModel.node, models],
@@ -236,45 +255,61 @@ const runnerLayer = AppNodeBuilder.build(SessionRunnerLLM.node, [
   [PermissionV2.node, permission],
   [Config.node, config],
 ])
-const execution = Layer.effect(
-  SessionExecution.Service,
-  Effect.gen(function* () {
-    const sessionRunner = yield* SessionRunner.Service
-    const coordinator = yield* SessionRunCoordinator.make<SessionV2.ID, SessionRunner.RunError>({
-      drain: (sessionID, force) => sessionRunner.run({ sessionID, force }),
-    })
-    return SessionExecution.Service.of({
-      active: coordinator.active,
-      resume: coordinator.run,
-      wake: coordinator.wake,
-      interrupt: coordinator.interrupt,
-    })
-  }),
-).pipe(Layer.provide(runnerLayer))
+const shardedRunnerLayer = AppNodeBuilder.build(SessionRunnerLLM.node, [
+  [Snapshot.node, Snapshot.noopLayer],
+  [LayerNodePlatform.llmClient, client],
+  [SessionRunnerModel.node, models],
+  [SystemContextRegistry.node, systemContext],
+  [Location.node, Location.boundNode({ directory: AbsolutePath.make("/project") })],
+  [SkillGuidance.node, skillGuidance],
+  [ReferenceGuidance.node, referenceGuidance],
+  [PermissionV2.node, permission],
+  [Config.node, config],
+])
+const executionFrom = (runner: typeof runnerLayer) =>
+  Layer.effect(
+    SessionExecution.Service,
+    Effect.gen(function* () {
+      const sessionRunner = yield* SessionRunner.Service
+      const coordinator = yield* SessionRunCoordinator.make<SessionV2.ID, SessionRunner.RunError>({
+        drain: (sessionID, force) => sessionRunner.run({ sessionID, force }),
+      })
+      return SessionExecution.Service.of({
+        active: coordinator.active,
+        resume: coordinator.run,
+        wake: coordinator.wake,
+        interrupt: coordinator.interrupt,
+      })
+    }),
+  ).pipe(Layer.provide(runner))
+const execution = executionFrom(runnerLayer)
+const shardedExecution = executionFrom(shardedRunnerLayer)
+const appNode = LayerNode.group([
+  Database.node,
+  EventV2.node,
+  QuestionV2.node,
+  SessionProjector.node,
+  SessionStore.node,
+  ApplicationTools.node,
+  AgentV2.node,
+  ToolRegistry.node,
+  ToolRegistry.toolsNode,
+  echoNode,
+  SessionRunnerModel.node,
+  SystemContextRegistry.node,
+  SkillGuidance.node,
+  ReferenceGuidance.node,
+  Config.node,
+  Snapshot.node,
+  SessionRunnerLLM.node,
+  SessionExecution.node,
+  SessionV2.node,
+])
 const it = testEffect(
   AppNodeBuilder.build(
-    LayerNode.group([
-      Database.node,
-      EventV2.node,
-      QuestionV2.node,
-      SessionProjector.node,
-      SessionStore.node,
-      ApplicationTools.node,
-      AgentV2.node,
-      ToolRegistry.node,
-      ToolRegistry.toolsNode,
-      echoNode,
-      SessionRunnerModel.node,
-      SystemContextRegistry.node,
-      SkillGuidance.node,
-      ReferenceGuidance.node,
-      Config.node,
-      Snapshot.node,
-      SessionRunnerLLM.node,
-      SessionExecution.node,
-      SessionV2.node,
-    ]),
+    appNode,
     [
+      [Database.node, database],
       [LayerNodePlatform.llmClient, client],
       [PermissionV2.node, permission],
       [SessionRunnerModel.node, models],
@@ -288,8 +323,36 @@ const it = testEffect(
     ],
   ),
 )
+const shardedIt = testEffect(
+  AppNodeBuilder.build(
+    appNode,
+    [
+      [LayerNodePlatform.llmClient, client],
+      [PermissionV2.node, permission],
+      [SessionRunnerModel.node, models],
+      [SystemContextRegistry.node, systemContext],
+      [Location.node, Location.boundNode({ directory: AbsolutePath.make("/project") })],
+      [SkillGuidance.node, skillGuidance],
+      [ReferenceGuidance.node, referenceGuidance],
+      [Snapshot.node, Snapshot.noopLayer],
+      [SessionExecution.node, shardedExecution],
+      [Config.node, config],
+    ],
+  ),
+)
 const sessionID = SessionV2.ID.make("ses_runner_test")
 const otherSessionID = SessionV2.ID.make("ses_runner_other")
+
+function removeShard(database: Database.Interface, id: SessionV2.ID) {
+  return Effect.gen(function* () {
+    yield* database.closeSession(id)
+    for (const ext of [".db", ".db-shm", ".db-wal"]) {
+      const file = path.join(database.sessionDir, `${id}${ext}`)
+      if (existsSync(file)) unlinkSync(file)
+    }
+    yield* database.resetSwept
+  })
+}
 
 const insertSession = (id: SessionV2.ID) =>
   Effect.gen(function* () {
@@ -337,6 +400,57 @@ const setup = Effect.gen(function* () {
     .pipe(Effect.orDie)
   yield* insertSession(sessionID)
 })
+
+const resetSession = (id: SessionV2.ID) =>
+  Effect.gen(function* () {
+    const database = yield* Database.Service
+    const events = yield* EventV2.Service
+    yield* removeShard(database, id)
+    yield* events.remove(id)
+    yield* database.db
+      .delete(SessionContextEpochTable)
+      .where(eq(SessionContextEpochTable.session_id, id))
+      .run()
+      .pipe(Effect.orDie)
+    yield* database.db.delete(SessionInputTable).where(eq(SessionInputTable.session_id, id)).run().pipe(Effect.orDie)
+    yield* database.db
+      .delete(SessionMessageTable)
+      .where(eq(SessionMessageTable.session_id, id))
+      .run()
+      .pipe(Effect.orDie)
+    yield* database.db.delete(SessionTable).where(eq(SessionTable.id, id)).run().pipe(Effect.orDie)
+  })
+
+const setupSharded = (id: SessionV2.ID) =>
+  Effect.gen(function* () {
+    response = []
+    systemBaseline = "Initial context"
+    systemRemoved = false
+    systemUnavailable = false
+    systemLoadHook = Effect.void
+    modelResolveHook = Effect.void
+    currentModel = model
+    skillBaselines.clear()
+    responses = undefined
+    streamFailure = undefined
+    responseStream = undefined
+    streamGate = undefined
+    streamStarted = undefined
+    toolExecutionGate = undefined
+    toolExecutionsStarted = undefined
+    toolExecutionsReady = 5
+    activeToolExecutions = 0
+    maxActiveToolExecutions = 0
+    const { db } = yield* Database.Service
+    yield* resetSession(id)
+    yield* db
+      .insert(ProjectTable)
+      .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+      .onConflictDoNothing()
+      .run()
+      .pipe(Effect.orDie)
+    yield* insertSession(id)
+  })
 
 const providerUnavailable = () =>
   new LLMError({
@@ -1008,6 +1122,48 @@ describe("SessionRunnerLLM", () => {
       expect(yield* session.messages({ sessionID })).toHaveLength(6)
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Fourth" }), resume: false })
       yield* session.resume(sessionID)
+    }),
+  )
+
+  shardedIt.live("observes context-epoch replacement requests stored in the session shard", () =>
+    Effect.gen(function* () {
+      const id = SessionV2.ID.make("ses_runner_sharded_epoch")
+      yield* setupSharded(id)
+      const session = yield* SessionV2.Service
+      const events = yield* EventV2.Service
+      const database = yield* Database.Service
+      yield* session.prompt({ sessionID: id, prompt: Prompt.make({ text: "First" }), resume: false })
+
+      requests.length = 0
+      response = []
+      yield* session.resume(id)
+      const shard = yield* database.resolveSession(id)
+      const shardEpoch = yield* shard
+        .select({ baselineSeq: SessionContextEpochTable.baseline_seq })
+        .from(SessionContextEpochTable)
+        .where(eq(SessionContextEpochTable.session_id, id))
+        .get()
+        .pipe(Effect.orDie)
+      expect(shardEpoch).toEqual({ baselineSeq: 0 })
+
+      yield* events.publish(SessionEvent.ModelSwitched, {
+        sessionID: id,
+        messageID: SessionMessage.ID.create(),
+        timestamp: DateTime.makeUnsafe(1),
+        model: { id: ModelV2.ID.make("replacement"), providerID: ProviderV2.ID.make("fake") },
+      })
+      systemBaseline = "Replacement context"
+      yield* session.prompt({ sessionID: id, prompt: Prompt.make({ text: "Second" }), resume: false })
+      yield* session.resume(id)
+
+      expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
+        ["Initial context"],
+        ["Initial context"],
+      ])
+      const replacementRequest = requests[1]
+      if (!replacementRequest) return yield* Effect.die("Replacement request was not recorded")
+      expect(systemTexts(replacementRequest)).toContain("Replacement context")
+      yield* resetSession(id)
     }),
   )
 
