@@ -9,6 +9,8 @@ import { Global } from "./global"
 import { EffectFlock } from "./util/effect-flock"
 import { makeRuntime } from "./effect/runtime"
 import { NpmConfig } from "./npm-config"
+import { classifyReleaseUrl, preResolveReleaseAsset } from "./npm-release"
+import { isGitSubdirSpec, preResolveGitSubdir } from "./npm-git"
 
 export class InstallFailedError extends Schema.TaggedErrorClass<InstallFailedError>()("NpmInstallFailedError", {
   add: Schema.Array(Schema.String).pipe(Schema.optional),
@@ -37,10 +39,16 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Npm") {}
 
-const illegal = process.platform === "win32" ? new Set(["<", ">", ":", '"', "|", "?", "*"]) : undefined
+// Always sanitize ':' and control chars regardless of platform: bun's import resolver
+// treats `foo:/bar` paths as URL schemes and bypasses registered plugins (like
+// @opentui/solid's JSX transform), even when the path exists on disk. The Windows-only
+// reserved set additionally includes <, >, ", |, ?, *.
+const illegal =
+  process.platform === "win32"
+    ? new Set(["<", ">", ":", '"', "|", "?", "*"])
+    : new Set([":"])
 
 export function sanitize(pkg: string) {
-  if (!illegal) return pkg
   return Array.from(pkg, (char) => (illegal.has(char) || char.charCodeAt(0) < 32 ? "_" : char)).join("")
 }
 
@@ -124,7 +132,31 @@ export const layer = Layer.effect(
         return resolveEntryPoint(name, path.join(dir, "node_modules", name))
       }
 
-      const tree = yield* reify({ dir, add: [pkg] })
+      // Pre-resolve specs that Arborist can't handle natively:
+      // 1. GitHub release asset URLs need our own auth (gh token / GITHUB_TOKEN).
+      // 2. Git ::path: subdir specs need pacote pre-pack.
+      // After pre-resolution, we hand Arborist a local file: spec instead of the original.
+      const arboristSpec = yield* Effect.gen(function* () {
+        const release = classifyReleaseUrl(pkg)
+        if (release) {
+          const localPath = yield* Effect.tryPromise({
+            try: () => preResolveReleaseAsset(release, { cacheRoot: global.cache }),
+            catch: (cause) => new InstallFailedError({ cause, add: [pkg], dir }),
+          })
+          return `file:${localPath}`
+        }
+        if (isGitSubdirSpec(pkg)) {
+          const npmConfig = yield* NpmConfig.load(dir)
+          const localPath = yield* Effect.tryPromise({
+            try: () => preResolveGitSubdir(pkg, { cacheRoot: global.cache, npmConfig }),
+            catch: (cause) => new InstallFailedError({ cause, add: [pkg], dir }),
+          })
+          return `file:${localPath}`
+        }
+        return pkg
+      })
+
+      const tree = yield* reify({ dir, add: [arboristSpec] })
       const first = tree.edgesOut.values().next().value?.to
       if (!first) {
         const result = resolveEntryPoint(name, path.join(dir, "node_modules", name))
