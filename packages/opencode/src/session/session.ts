@@ -24,6 +24,7 @@ import { PartTable, SessionTable } from "./session.sql"
 import { ProjectTable } from "../project/project.sql"
 import { Storage } from "@/storage/storage"
 import * as Log from "@opencode-ai/core/util/log"
+import { NamedError } from "@opencode-ai/core/util/error"
 import { MessageV2 } from "./message-v2"
 import type { InstanceContext } from "../project/instance"
 import { InstanceState } from "@/effect/instance-state"
@@ -37,6 +38,7 @@ import type { Provider } from "@/provider/provider"
 import { Permission } from "@/permission"
 import { Global } from "@opencode-ai/core/global"
 import { Effect, Layer, Option, Context, Schema, Types } from "effect"
+import { z } from "zod"
 import { zod } from "@opencode-ai/core/effect-zod"
 import { NonNegativeInt, optionalOmitUndefined, withStatics } from "@opencode-ai/core/schema"
 
@@ -217,6 +219,7 @@ export type GlobalInfo = Types.DeepMutable<Schema.Schema.Type<typeof GlobalInfo>
 
 export const CreateInput = Schema.optional(
   Schema.Struct({
+    id: Schema.optional(SessionID),
     parentID: Schema.optional(SessionID),
     title: Schema.optional(Schema.String),
     agent: Schema.optional(Schema.String),
@@ -423,9 +426,17 @@ export class BusyError extends Error {
 
 export type NotFound = InstanceType<typeof NotFoundError>
 
+export const DuplicateIDError = NamedError.create(
+  "DuplicateIDError",
+  z.object({
+    id: z.string(),
+  }),
+)
+
 export interface Interface {
   readonly list: (input?: ListInput) => Effect.Effect<Info[]>
   readonly create: (input?: {
+    id?: SessionID
     parentID?: SessionID
     title?: string
     agent?: string
@@ -619,6 +630,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
     })
 
     const create = Effect.fn("Session.create")(function* (input?: {
+      id?: SessionID
       parentID?: SessionID
       title?: string
       agent?: string
@@ -629,6 +641,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
       const ctx = yield* InstanceState.context
       const workspace = yield* InstanceState.workspaceID
       return yield* createNext({
+        id: input?.id,
         parentID: input?.parentID,
         directory: ctx.directory,
         path: sessionPath(ctx.worktree, ctx.directory),

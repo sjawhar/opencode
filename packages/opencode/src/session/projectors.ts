@@ -16,6 +16,11 @@ function foreign(err: unknown) {
   if ("code" in err && err.code === "SQLITE_CONSTRAINT_FOREIGNKEY") return true
   return "message" in err && typeof err.message === "string" && err.message.includes("FOREIGN KEY constraint failed")
 }
+function duplicate(err: unknown, table: string) {
+  if (typeof err !== "object" || err === null) return false
+  if (!("message" in err) || typeof err.message !== "string") return false
+  return err.message.includes(`UNIQUE constraint failed: ${table}.id`)
+}
 
 export type DeepPartial<T> = T extends object ? { [K in keyof T]?: DeepPartial<T[K]> | null } : T
 
@@ -67,9 +72,14 @@ export function toPartialRow(info: DeepPartial<Session.Info>) {
 
 export default [
   SyncEvent.project(Session.Event.Created, (db, data) => {
-    db.insert(SessionTable)
-      .values(Session.toRow(data.info as Session.Info))
-      .run()
+    try {
+      db.insert(SessionTable)
+        .values(Session.toRow(data.info as Session.Info))
+        .run()
+    } catch (err) {
+      if (duplicate(err, "session")) throw new Session.DuplicateIDError({ id: data.info.id })
+      throw err
+    }
 
     if (data.info.workspaceID) {
       db.update(WorkspaceTable).set({ time_used: Date.now() }).where(eq(WorkspaceTable.id, data.info.workspaceID)).run()
