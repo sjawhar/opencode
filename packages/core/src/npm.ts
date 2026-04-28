@@ -12,6 +12,8 @@ import { filesystem } from "./effect/app-node-platform"
 import { LayerNode } from "./effect/layer-node"
 import { makeRuntime } from "./effect/runtime"
 import { NpmConfig } from "./npm-config"
+import { classifyReleaseUrl, preResolveReleaseAsset } from "./npm-release"
+import { isGitSubdirSpec, preResolveGitSubdir } from "./npm-git"
 
 export class InstallFailedError extends Schema.TaggedErrorClass<InstallFailedError>()("NpmInstallFailedError", {
   add: Schema.Array(Schema.String).pipe(Schema.optional),
@@ -40,10 +42,16 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Npm") {}
 
-const illegal = process.platform === "win32" ? new Set(["<", ">", ":", '"', "|", "?", "*"]) : undefined
+// Always sanitize ':' and control chars regardless of platform: bun's import resolver
+// treats `foo:/bar` paths as URL schemes and bypasses registered plugins (like
+// @opentui/solid's JSX transform), even when the path exists on disk. The Windows-only
+// reserved set additionally includes <, >, ", |, ?, *.
+const illegal =
+  process.platform === "win32"
+    ? new Set(["<", ">", ":", '"', "|", "?", "*"])
+    : new Set([":"])
 
 export function sanitize(pkg: string) {
-  if (!illegal) return pkg
   return Array.from(pkg, (char) => (illegal.has(char) || char.charCodeAt(0) < 32 ? "_" : char)).join("")
 }
 
@@ -69,6 +77,22 @@ interface ArboristTree {
   edgesOut: Map<string, { to?: ArboristNode }>
 }
 
+// pacote "prepares" a git dep whose manifest declares build/prepare-family
+// scripts (prepare, prepack, build, ...) by spawning `npmBin` to install the
+// dep's own dependencies first. The npmBin derived from our npm config points
+// inside opencode's package directory, which ships no npm-cli.js, so that
+// spawn can never succeed and every such git spec fails with "git dep
+// preparation failed". We always install with ignoreScripts, under which
+// pacote's DirFetcher skips the prepare script anyway - the dependency
+// install would be pure waste even if it worked. Replace it with a no-op
+// (`<runtime> --version`: bun in dev, the opencode binary when compiled) so
+// git specs install as checked out.
+const gitPrepNoop = {
+  npmBin: process.execPath,
+  npmInstallCmd: ["--version"],
+  npmCliConfig: [],
+}
+
 const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -82,7 +106,7 @@ const layer = Layer.effect(
         yield* flock.acquire(`npm-install:${input.dir}`)
         const { Arborist } = yield* Effect.promise(() => import("@npmcli/arborist"))
         const add = input.add ?? []
-        const npmOptions = yield* NpmConfig.load(input.dir)
+        const npmOptions = { ...(yield* NpmConfig.load(input.dir)), ...gitPrepNoop }
         const arborist = new Arborist({
           ...npmOptions,
           path: input.dir,
@@ -126,7 +150,31 @@ const layer = Layer.effect(
         return resolveEntryPoint(name, path.join(dir, "node_modules", name))
       }
 
-      const tree = yield* reify({ dir, add: [pkg] })
+      // Pre-resolve specs that Arborist can't handle natively:
+      // 1. GitHub release asset URLs need our own auth (gh token / GITHUB_TOKEN).
+      // 2. Git ::path: subdir specs need pacote pre-pack.
+      // After pre-resolution, we hand Arborist a local file: spec instead of the original.
+      const arboristSpec = yield* Effect.gen(function* () {
+        const release = classifyReleaseUrl(pkg)
+        if (release) {
+          const localPath = yield* Effect.tryPromise({
+            try: () => preResolveReleaseAsset(release, { cacheRoot: global.cache }),
+            catch: (cause) => new InstallFailedError({ cause, add: [pkg], dir }),
+          })
+          return `file:${localPath}`
+        }
+        if (isGitSubdirSpec(pkg)) {
+          const npmConfig = { ...(yield* NpmConfig.load(dir)), ...gitPrepNoop }
+          const localPath = yield* Effect.tryPromise({
+            try: () => preResolveGitSubdir(pkg, { cacheRoot: global.cache, npmConfig }),
+            catch: (cause) => new InstallFailedError({ cause, add: [pkg], dir }),
+          })
+          return `file:${localPath}`
+        }
+        return pkg
+      })
+
+      const tree = yield* reify({ dir, add: [arboristSpec] })
       const first = tree.edgesOut.values().next().value?.to
       if (!first) {
         const result = resolveEntryPoint(name, path.join(dir, "node_modules", name))
