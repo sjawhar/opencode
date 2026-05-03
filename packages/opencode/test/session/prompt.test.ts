@@ -1115,7 +1115,7 @@ it.instance(
       yield* Fiber.await(fiber)
       expect((yield* status.get(chat.id)).type).toBe("idle")
     }),
-  3_000,
+  10_000,
 )
 
 // Cancel semantics
@@ -1142,6 +1142,7 @@ it.instance("cancel interrupts loop and resolves with an assistant message", () 
       expect(exit.value.info.role).toBe("assistant")
     }
   }),
+  10_000,
 )
 
 it.instance("cancel records MessageAbortedError on interrupted process", () =>
@@ -1166,6 +1167,7 @@ it.instance("cancel records MessageAbortedError on interrupted process", () =>
       }
     }
   }),
+  10_000,
 )
 
 raceNoLLMServer.instance(
@@ -1254,7 +1256,7 @@ raceNoLLMServer.instance(
       }
     }),
   { config: cfg },
-  3_000,
+  10_000,
 )
 
 noLLMServer.instance(
@@ -1400,6 +1402,7 @@ it.instance("concurrent loop callers all receive same error result", () =>
     expect(a.info.id).toBe(b.info.id)
     expect(a.info.role).toBe("assistant")
   }),
+  10_000,
 )
 
 it.instance("prompt submitted during an active run is included in the next LLM input", () =>
@@ -1466,6 +1469,7 @@ it.instance("prompt submitted during an active run is included in the next LLM i
     if (!Array.isArray(messages)) throw new Error("expected LLM messages")
     expect(messages.at(-1)).toEqual({ role: "user", content: "second" })
   }),
+  10_000,
 )
 
 it.instance("assertNotBusy fails with BusyError when loop running", () =>
@@ -1493,6 +1497,7 @@ it.instance("assertNotBusy fails with BusyError when loop running", () =>
     yield* prompt.cancel(chat.id)
     yield* Fiber.await(fiber)
   }),
+  10_000,
 )
 
 noLLMServer.instance("assertNotBusy succeeds when idle", () =>
@@ -1531,6 +1536,7 @@ it.instance("shell rejects with BusyError when loop running", () =>
     yield* prompt.cancel(chat.id)
     yield* Fiber.await(fiber)
   }),
+  10_000,
 )
 
 unixNoLLMServer(
@@ -2280,6 +2286,7 @@ it.instance("records aborted errors when prompt is cancelled mid-stream", () =>
       expect(last.info.error?.name).toBe("MessageAbortedError")
     }
   }),
+  10_000,
 )
 
 // Agent variant

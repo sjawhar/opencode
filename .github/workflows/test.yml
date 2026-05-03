@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - dev
+      - sami
   pull_request:
   workflow_dispatch:
 
@@ -28,9 +29,9 @@ jobs:
       matrix:
         settings:
           - name: linux
-            host: blacksmith-4vcpu-ubuntu-2404
+            host: ubuntu-latest
           - name: windows
-            host: blacksmith-4vcpu-windows-2025
+            host: windows-latest
     runs-on: ${{ matrix.settings.host }}
     defaults:
       run:
@@ -64,10 +65,100 @@ jobs:
             turbo-${{ runner.os }}-
 
       - name: Run unit tests
-        timeout-minutes: 20
-        run: GITHUB_ACTIONS=false bun turbo test
+        timeout-minutes: 28
+        run: |
+          set -uo pipefail
+
+          if [ "$RUNNER_OS" != "Linux" ]; then
+            GITHUB_ACTIONS=false bun turbo test
+            exit $?
+          fi
+          # bun on GitHub-hosted Linux runners has intermittently failed to exit after
+          # the suite completes (exit-spin). Run the suite detached with streamed task
+          # logs so every result reaches the log even mid-spin, wait for a normal exit,
+          # and only after a long quiet period or the deadline reap OUR OWN process
+          # group and decide the result from the streamed log.
+          #
+          # Never sweep-kill workspace processes by name: a previous version of this
+          # step killed every bun/turbo/node process with a workspace cwd, which
+          # repeatedly took down the runner itself ("The runner has received a shutdown
+          # signal") and, worse, killed still-running suites ~60s in and then declared
+          # success from the partial log. Orphans that escape our process group are
+          # reaped by the runner's own cleanup at job end.
+          LOG="${RUNNER_TEMP:-/tmp}/unit-test.log"
+          : > "$LOG"
+
+          setsid bash -c 'exec </dev/null; GITHUB_ACTIONS=false bun turbo test --log-order=stream --continue' > "$LOG" 2>&1 &
+          PID=$!
+          PGID="$(ps -o pgid= -p "$PID" | tr -d ' ' || true)"
+
+          # Stream the log into the job output live so results survive any failure mode.
+          tail -n +1 -F "$LOG" 2>/dev/null &
+          TAILPID=$!
+
+          stable=0
+          last=-1
+          mode=deadline
+          deadline=$((SECONDS + 24 * 60))
+
+          while kill -0 "$PID" 2>/dev/null; do
+            sz="$(wc -c < "$LOG" 2>/dev/null || echo 0)"
+            if [ "$sz" -eq "$last" ]; then
+              stable=$((stable + 1))
+            else
+              stable=0
+              last="$sz"
+            fi
+            # 10 minutes of total output silence means the run is hung or spinning.
+            # The verification below still decides the result honestly: a suite that
+            # was killed mid-run has no turbo completion summary and fails the step.
+            if [ "$stable" -ge 120 ]; then
+              mode=quiet
+              break
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              mode=deadline
+              break
+            fi
+            sleep 5
+          done
+
+          if ! kill -0 "$PID" 2>/dev/null; then
+            wait "$PID"
+            rc=$?
+            kill "$TAILPID" 2>/dev/null || true
+            echo "unit suite process exited on its own (rc=$rc)"
+            exit "$rc"
+          fi
+
+          echo "::warning::unit suite did not exit (mode=$mode); reaping our process group and verifying results from the log."
+          if [ -n "${PGID:-}" ]; then
+            kill -TERM "-$PGID" 2>/dev/null || true
+            sleep 2
+            kill -KILL "-$PGID" 2>/dev/null || true
+          fi
+          kill "$TAILPID" 2>/dev/null || true
+
+          if ! grep -qE 'Ran [0-9]+ tests' "$LOG"; then
+            echo "::error::no test output found; unit suite may not have run"
+            exit 1
+          fi
+          if grep -qE '\(fail\) |[1-9][0-9]* fail|finished with error|run failed|Command failed|ELIFECYCLE' "$LOG"; then
+            echo "::error::unit suite reported test failures"
+            exit 1
+          fi
+          if ! grep -qE 'Tasks:[[:space:]]+[0-9]+ successful' "$LOG"; then
+            echo "::error::suite never reached turbo completion; treating as failure"
+            exit 1
+          fi
+          echo "unit suite completed with no failures despite the exit-spin"
+          exit 0
         env:
-          OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: ${{ runner.os == 'Windows' && 'true' || 'false' }}
+          # Native @parcel/watcher (inotify on Linux) keeps a live OS handle/thread that blocks bun
+          # from exiting after the suite completes -> the exit-spin/hang that fails unit (linux). Unit
+          # tests never need a live watcher (watcher.test.ts is CI-skipped and sets its own flag), so
+          # disable it on all platforms -- Windows already did this; Linux never got the same fix.
+          OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: "true"
 
       - name: Check generated client
         if: runner.os == 'Linux'
@@ -86,9 +177,9 @@ jobs:
       matrix:
         settings:
           - name: linux
-            host: blacksmith-4vcpu-ubuntu-2404
+            host: ubuntu-latest
           - name: windows
-            host: blacksmith-4vcpu-windows-2025
+            host: windows-latest
     runs-on: ${{ matrix.settings.host }}
     env:
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright-browsers
