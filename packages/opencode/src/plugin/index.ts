@@ -27,6 +27,7 @@ import { PluginLoader } from "./loader"
 import { parsePluginSpecifier, readPluginId, readV1Plugin, resolvePluginId } from "./shared"
 import { registerAdapter } from "@/control-plane/adapters"
 import type { WorkspaceAdapter } from "@/control-plane/types"
+import { Skill } from "../skill"
 
 const log = Log.create({ service: "plugin" })
 
@@ -110,6 +111,7 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const bus = yield* Bus.Service
     const config = yield* Config.Service
+    const skill = yield* Skill.Service
 
     const state = yield* InstanceState.make<State>(
       Effect.fn("Plugin.state")(function* (ctx) {
@@ -144,6 +146,23 @@ export const layer = Layer.effect(
           },
           // @ts-expect-error
           $: typeof Bun === "undefined" ? undefined : Bun.$,
+          skills: {
+            all: () =>
+              bridge.promise(
+                skill.all().pipe(
+                  Effect.orDie,
+                  Effect.map((items) => items.map((item) => ({ ...item, description: item.description ?? "" }))),
+                ),
+              ),
+            get: (name: string) =>
+              bridge.promise(
+                skill.get(name).pipe(
+                  Effect.orDie,
+                  Effect.map((item) => (item ? { ...item, description: item.description ?? "" } : item)),
+                ),
+              ),
+            dirs: () => bridge.promise(skill.dirs().pipe(Effect.orDie)),
+          },
         }
 
         for (const plugin of INTERNAL_PLUGINS) {
@@ -283,6 +302,10 @@ export const layer = Layer.effect(
   }),
 )
 
-export const defaultLayer = layer.pipe(Layer.provide(Bus.layer), Layer.provide(Config.defaultLayer))
+export const defaultLayer = layer.pipe(
+  Layer.provide(Bus.layer),
+  Layer.provide(Config.defaultLayer),
+  Layer.provide(Skill.defaultLayer),
+)
 
 export * as Plugin from "."

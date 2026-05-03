@@ -4,7 +4,6 @@ import path from "path"
 
 import { disposeAllInstances, tmpdir } from "../fixture/fixture"
 import { Global } from "@opencode-ai/core/global"
-import { Instance } from "../../src/project/instance"
 import { WithInstance } from "../../src/project/with-instance"
 import { Plugin } from "../../src/plugin/index"
 import { ModelsDev } from "@/provider/models"
@@ -1751,6 +1750,45 @@ test("model limit defaults to zero when not specified", async () => {
     },
   })
 })
+
+test("config provider model limit overrides individual fields", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        path.join(dir, "opencode.json"),
+        JSON.stringify({
+          $schema: "https://opencode.ai/config.json",
+          provider: {
+            "limit-override": {
+              name: "Limit Override Provider",
+              npm: "@ai-sdk/openai-compatible",
+              env: [],
+              models: {
+                model: {
+                  name: "Model",
+                  tool_call: true,
+                  limit: { context: 100000, input: 80000, output: 16000 },
+                },
+              },
+              options: { apiKey: "test" },
+            },
+          },
+        }),
+      )
+    },
+  })
+  await WithInstance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const providers = await list()
+      const model = providers[ProviderID.make("limit-override")].models[ModelID.make("model")]
+      expect(model.limit.context).toBe(100000)
+      expect(model.limit.input).toBe(80000)
+      expect(model.limit.output).toBe(16000)
+    },
+  })
+})
+
 
 test("provider options are deeply merged", async () => {
   await using tmp = await tmpdir({

@@ -30,6 +30,8 @@ export type Event =
   | EventTuiSessionSelect
   | EventMcpToolsChanged
   | EventMcpBrowserOpenFailed
+  | EventMcpResourceUpdated
+  | EventMcpResourceListChanged
   | EventCommandExecuted
   | EventProjectUpdated
   | EventVcsBranchUpdated
@@ -803,6 +805,8 @@ export type GlobalEvent = {
     | EventTuiSessionSelect
     | EventMcpToolsChanged
     | EventMcpBrowserOpenFailed
+    | EventMcpResourceUpdated
+    | EventMcpResourceListChanged
     | EventCommandExecuted
     | EventProjectUpdated
     | EventVcsBranchUpdated
@@ -1675,6 +1679,13 @@ export type ProviderAuthAuthorization = {
   instructions: string
 }
 
+export type DuplicateIdError = {
+  name: "DuplicateIDError"
+  data: {
+    id: string
+  }
+}
+
 export type TextPartInput = {
   id?: string
   type: "text"
@@ -2507,6 +2518,23 @@ export type EventMcpBrowserOpenFailed = {
   properties: {
     mcpName: string
     url: string
+  }
+}
+
+export type EventMcpResourceUpdated = {
+  id: string
+  type: "mcp.resource.updated"
+  properties: {
+    server: string
+    uri: string
+  }
+}
+
+export type EventMcpResourceListChanged = {
+  id: string
+  type: "mcp.resource.list.changed"
+  properties: {
+    server: string
   }
 }
 
@@ -5146,6 +5174,7 @@ export type SessionListResponse = SessionListResponses[keyof SessionListResponse
 
 export type SessionCreateData = {
   body?: {
+    id?: string
     parentID?: string
     title?: string
     agent?: string
@@ -5170,6 +5199,10 @@ export type SessionCreateErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * DuplicateIDError
+   */
+  409: DuplicateIdError
 }
 
 export type SessionCreateError = SessionCreateErrors[keyof SessionCreateErrors]

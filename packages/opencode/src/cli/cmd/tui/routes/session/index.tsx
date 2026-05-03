@@ -1998,8 +1998,11 @@ function Task(props: ToolProps<typeof TaskTool>) {
   const sync = useSync()
 
   onMount(() => {
-    if (props.metadata.sessionId && !sync.data.message[props.metadata.sessionId]?.length)
-      void sync.session.sync(props.metadata.sessionId)
+    const sessionId = props.metadata.sessionId
+    if (!sessionId || sync.data.message[sessionId]?.length) return
+    // Subagent sessions can be removed (deleted, cleaned up, never persisted),
+    // so swallow 404s here; the Task tool still renders without a message preview.
+    sync.session.sync(sessionId).catch(() => {})
   })
 
   const messages = createMemo(() => sync.data.message[props.metadata.sessionId ?? ""] ?? [])
