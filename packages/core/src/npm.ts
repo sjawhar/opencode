@@ -9,6 +9,8 @@ import { Global } from "./global"
 import { EffectFlock } from "./util/effect-flock"
 import { makeRuntime } from "./effect/runtime"
 import { NpmConfig } from "./npm-config"
+import { classifyReleaseUrl, preResolveReleaseAsset } from "./npm-release"
+import { isGitSubdirSpec, preResolveGitSubdir } from "./npm-git"
 
 export class InstallFailedError extends Schema.TaggedErrorClass<InstallFailedError>()("NpmInstallFailedError", {
   add: Schema.Array(Schema.String).pipe(Schema.optional),
@@ -37,10 +39,16 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Npm") {}
 
-const illegal = process.platform === "win32" ? new Set(["<", ">", ":", '"', "|", "?", "*"]) : undefined
+// Always sanitize ':' and control chars regardless of platform: bun's import resolver
+// treats `foo:/bar` paths as URL schemes and bypasses registered plugins (like
+// @opentui/solid's JSX transform), even when the path exists on disk. The Windows-only
+// reserved set additionally includes <, >, ", |, ?, *.
+const illegal =
+  process.platform === "win32"
+    ? new Set(["<", ">", ":", '"', "|", "?", "*"])
+    : new Set([":"])
 
 export function sanitize(pkg: string) {
-  if (!illegal) return pkg
   return Array.from(pkg, (char) => (illegal.has(char) || char.charCodeAt(0) < 32 ? "_" : char)).join("")
 }
 
@@ -112,22 +120,63 @@ export const layer = Layer.effect(
 
     const add = Effect.fn("Npm.add")(function* (pkg: string) {
       const dir = directory(pkg)
-      const name = (() => {
+      const npaName = (() => {
         try {
-          return npa(pkg).name ?? pkg
+          return npa(pkg).name ?? undefined
         } catch {
-          return pkg
+          return undefined
         }
       })()
 
-      if (yield* afs.existsSafe(path.join(dir, "node_modules", name))) {
-        return resolveEntryPoint(name, path.join(dir, "node_modules", name))
+      if (yield* afs.existsSafe(dir)) {
+        // For non-registry specs (remote tarball URLs, git+https://, github:
+        // shorthand, file: paths), npa(pkg).name returns undefined — only
+        // registry packages have inferable names from the spec alone. Read
+        // the install-root package.json (written by Arborist on the initial
+        // install) to recover the actual installed package name from its
+        // first dependency entry, matching what the fresh-install path
+        // computes from the arborist tree below.
+        const cachedPkg = yield* afs.readJson(path.join(dir, "package.json")).pipe(Effect.option)
+        if (Option.isSome(cachedPkg)) {
+          const deps = (cachedPkg.value as { dependencies?: Record<string, unknown> })?.dependencies
+          const first = deps && Object.keys(deps)[0]
+          if (first) {
+            return resolveEntryPoint(first, path.join(dir, "node_modules", first))
+          }
+        }
+        // Cache directory exists but is empty / has no installable package.json —
+        // fall through to the Arborist install path below.
       }
 
-      const tree = yield* reify({ dir, add: [pkg] })
+      // Pre-resolve specs that Arborist can't handle natively:
+      // 1. GitHub release asset URLs need our own auth (gh token / GITHUB_TOKEN).
+      // 2. Git ::path: subdir specs need pacote pre-pack.
+      // After pre-resolution, we hand Arborist a local file: spec instead of the original.
+      const arboristSpec = yield* Effect.gen(function* () {
+        const release = classifyReleaseUrl(pkg)
+        if (release) {
+          const localPath = yield* Effect.tryPromise({
+            try: () => preResolveReleaseAsset(release, { cacheRoot: global.cache }),
+            catch: (cause) => new InstallFailedError({ cause, add: [pkg], dir }),
+          })
+          return `file:${localPath}`
+        }
+        if (isGitSubdirSpec(pkg)) {
+          const npmConfig = yield* NpmConfig.load(dir)
+          const localPath = yield* Effect.tryPromise({
+            try: () => preResolveGitSubdir(pkg, { cacheRoot: global.cache, npmConfig }),
+            catch: (cause) => new InstallFailedError({ cause, add: [pkg], dir }),
+          })
+          return `file:${localPath}`
+        }
+        return pkg
+      })
+
+      const tree = yield* reify({ dir, add: [arboristSpec] })
       const first = tree.edgesOut.values().next().value?.to
       if (!first) {
-        const result = resolveEntryPoint(name, path.join(dir, "node_modules", name))
+        const fallbackName = npaName ?? pkg
+        const result = resolveEntryPoint(fallbackName, path.join(dir, "node_modules", fallbackName))
         if (Option.isSome(result.entrypoint)) return result
         return yield* new InstallFailedError({ add: [pkg], dir })
       }

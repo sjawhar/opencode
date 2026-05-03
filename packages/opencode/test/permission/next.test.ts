@@ -948,6 +948,52 @@ it.live("reply - publishes replied event", () =>
   ),
 )
 
+it.live("interrupt - publishes Replied(reject) so TUI orphans get dismissed", () =>
+  withDir({ git: true }, () =>
+    Effect.gen(function* () {
+      const bus = yield* Bus.Service
+      const received: { sessionID: SessionID; requestID: PermissionID; reply: Permission.Reply }[] = []
+      const unsub = yield* bus.subscribeCallback(Permission.Event.Replied, (event) => {
+        received.push(event.properties)
+      })
+
+      try {
+        const fiber = yield* ask({
+          id: PermissionID.make("per_interrupt"),
+          sessionID: SessionID.make("session_interrupt"),
+          permission: "read",
+          patterns: [".env.template"],
+          metadata: {},
+          always: ["*"],
+          ruleset: [],
+        }).pipe(Effect.forkScoped)
+
+        yield* waitForPending(1)
+
+        // Simulate the tool execution being interrupted before the user replies
+        // (session ended, parent killed, scope torn down, etc.). Without the
+        // finalizer publishing a synthetic reject, the TUI's sync.data.permission
+        // would keep showing the prompt forever.
+        yield* Fiber.interrupt(fiber)
+
+        // Give the finalizer a moment to publish.
+        yield* Effect.sleep("20 millis")
+
+        expect(received).toEqual([
+          {
+            sessionID: SessionID.make("session_interrupt"),
+            requestID: PermissionID.make("per_interrupt"),
+            reply: "reject",
+          },
+        ])
+        expect(yield* list()).toHaveLength(0)
+      } finally {
+        unsub()
+      }
+    }),
+  ),
+)
+
 it.live("permission requests stay isolated by directory", () =>
   Effect.gen(function* () {
     const one = yield* tmpdirScoped({ git: true })

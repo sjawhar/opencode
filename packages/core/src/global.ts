@@ -8,7 +8,7 @@ import { Flag } from "./flag/flag"
 
 const app = "opencode"
 const data = path.join(xdgData!, app)
-const cache = path.join(xdgCache!, app)
+const cache = process.env.OPENCODE_CACHE_PATH ?? path.join(xdgCache!, app)
 const config = path.join(xdgConfig!, app)
 const state = path.join(xdgState!, app)
 const tmp = path.join(os.tmpdir(), app)
@@ -21,7 +21,10 @@ const paths = {
   bin: path.join(cache, "bin"),
   log: path.join(data, "log"),
   repos: path.join(data, "repos"),
-  cache,
+  // Allow override via OPENCODE_CACHE_PATH for test isolation; re-read on each access
+  get cache() {
+    return process.env.OPENCODE_CACHE_PATH ?? cache
+  },
   config,
   state,
   tmp,

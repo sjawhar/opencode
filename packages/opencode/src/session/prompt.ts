@@ -923,7 +923,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     })
 
     const createUserMessage = Effect.fn("SessionPrompt.createUserMessage")(function* (input: PromptInput) {
-      const agentName = input.agent || (yield* agents.defaultAgent())
+      const prev = input.agent
+        ? undefined
+        : (yield* MessageV2.filterCompactedEffect(input.sessionID)).findLast(
+            (m): m is MessageV2.WithParts & { info: MessageV2.User } =>
+              m.info.role === "user" && !!m.info.agent,
+          )
+      const agentName = input.agent || prev?.info.agent || (yield* agents.defaultAgent())
       const ag = yield* agents.get(agentName)
       if (!ag) {
         const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
@@ -933,7 +939,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         throw error
       }
 
-      const model = input.model ?? ag.model ?? (yield* lastModel(input.sessionID))
+      const model = input.model ?? prev?.info.model ?? ag.model ?? (yield* lastModel(input.sessionID))
       const same = ag.model && model.providerID === ag.model.providerID && model.modelID === ag.model.modelID
       const full =
         !input.variant && ag.variant && same

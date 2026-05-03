@@ -56,20 +56,22 @@ async function seedCorruptStepFinishPart(directory: string) {
           })
           // Schema.Finite still rejects NaN at encode — exact mirror of the
           // corrupt row that broke the user's session in the OMO/Windows bug.
-          Database.use((db) =>
-            db
-              .update(PartTable)
-              .set({
-                data: {
-                  type: "step-finish",
-                  reason: "stop",
-                  cost: 0,
-                  tokens: { input: 0, output: NaN, reasoning: 0, cache: { read: 0, write: 0 } },
-                } as never, // drizzle's .set() can't narrow the discriminated union
-              })
-              .where(eq(PartTable.id, partID))
-              .run(),
-          )
+          // Schema.Finite still rejects NaN at encode — exact mirror of the
+          // corrupt row that broke the user's session in the OMO/Windows bug.
+          // Target the per-session shard DB directly: with sharding the part
+          // lives in `<dataPath>/sessions/<sessionID>.db`, not the main DB.
+          Database.session(info.id)
+            .update(PartTable)
+            .set({
+              data: {
+                type: "step-finish",
+                reason: "stop",
+                cost: 0,
+                tokens: { input: 0, output: NaN, reasoning: 0, cache: { read: 0, write: 0 } },
+              } as never, // drizzle's .set() can't narrow the discriminated union
+            })
+            .where(eq(PartTable.id, partID))
+            .run()
           return info.id
         }).pipe(Effect.provide(Session.defaultLayer)),
       ),

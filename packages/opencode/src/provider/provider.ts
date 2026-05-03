@@ -1399,6 +1399,13 @@ const layer: Layer.Layer<
                 (v) => omit(v, ["disabled"]),
               )
             }
+
+            const configLimit = configProvider?.models?.[modelID]?.limit
+            if (configLimit) {
+              if (configLimit.context) model.limit.context = configLimit.context
+              if (configLimit.input) model.limit.input = configLimit.input
+              if (configLimit.output) model.limit.output = configLimit.output
+            }
           }
 
           if (Object.keys(provider.models).length === 0) {

@@ -8,7 +8,9 @@ import { provideTmpdirInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 
 const disableDefault = process.env.OPENCODE_DISABLE_DEFAULT_PLUGINS
+const configContent = process.env.OPENCODE_CONFIG_CONTENT
 process.env.OPENCODE_DISABLE_DEFAULT_PLUGINS = "1"
+delete process.env.OPENCODE_CONFIG_CONTENT
 
 const { Plugin } = await import("../../src/plugin/index")
 const it = testEffect(Layer.mergeAll(Plugin.defaultLayer, CrossSpawnSpawner.defaultLayer))
@@ -17,9 +19,14 @@ const systemHook = "experimental.chat.system.transform"
 afterAll(() => {
   if (disableDefault === undefined) {
     delete process.env.OPENCODE_DISABLE_DEFAULT_PLUGINS
+  } else {
+    process.env.OPENCODE_DISABLE_DEFAULT_PLUGINS = disableDefault
+  }
+  if (configContent === undefined) {
+    delete process.env.OPENCODE_CONFIG_CONTENT
     return
   }
-  process.env.OPENCODE_DISABLE_DEFAULT_PLUGINS = disableDefault
+  process.env.OPENCODE_CONFIG_CONTENT = configContent
 })
 
 function withProject<A, E, R>(source: string, self: Effect.Effect<A, E, R>) {

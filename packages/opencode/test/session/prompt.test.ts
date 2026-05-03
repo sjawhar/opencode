@@ -125,6 +125,9 @@ const mcp = Layer.succeed(
     disconnect: () => Effect.void,
     getPrompt: () => Effect.succeed(undefined),
     readResource: () => Effect.succeed(undefined),
+    subscribe: () => Effect.succeed(false),
+    unsubscribe: () => Effect.succeed(false),
+    subscriptions: () => Effect.succeed({}),
     startAuth: () => Effect.die("unexpected MCP auth in prompt-effect tests"),
     authenticate: () => Effect.die("unexpected MCP auth in prompt-effect tests"),
     finishAuth: () => Effect.die("unexpected MCP auth in prompt-effect tests"),
@@ -409,9 +412,11 @@ it.live("prompt emits v2 prompted and synthetic events", () =>
       const messages = yield* SessionV2.Service.use((session) => session.messages({ sessionID: chat.id })).pipe(
         Effect.provide(SessionV2.layer),
       )
-      const row = Database.use((db) =>
-        db.select().from(SessionMessageTable).where(Database.eq(SessionMessageTable.session_id, chat.id)).get(),
-      )
+      const row = Database.resolveSession(chat.id)
+        .select()
+        .from(SessionMessageTable)
+        .where(Database.eq(SessionMessageTable.session_id, chat.id))
+        .get()
       expect(messages.find((message) => message.type === "user")).toMatchObject({ type: "user", text: "hello v2" })
       expect(typeof row?.data.time.created).toBe("number")
       expect(messages).toEqual(
@@ -1898,6 +1903,43 @@ it.live(
 )
 
 // Agent variant
+
+it.live("prompt without agent and model preserves current session agent and model", () =>
+  provideTmpdirInstance(
+    (_dir) =>
+      Effect.gen(function* () {
+        const prompt = yield* SessionPrompt.Service
+        const sessions = yield* Session.Service
+        const session = yield* sessions.create({})
+
+        yield* prompt.prompt({
+          sessionID: session.id,
+          agent: "build",
+          model: ref,
+          noReply: true,
+          parts: [{ type: "text", text: "hello" }],
+        })
+
+        const next = yield* prompt.prompt({
+          sessionID: session.id,
+          noReply: true,
+          parts: [{ type: "text", text: "hello again" }],
+        })
+        if (next.info.role !== "user") throw new Error("expected user message")
+        expect(next.info.agent).toBe("build")
+        expect(next.info.model).toEqual(ref)
+
+        yield* sessions.remove(session.id)
+      }),
+    {
+      git: true,
+      config: {
+        ...cfg,
+        default_agent: "plan",
+      },
+    },
+  ),
+)
 
 it.live("applies agent variant only when using agent model", () =>
   provideTmpdirInstance(

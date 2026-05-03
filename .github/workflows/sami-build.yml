@@ -1,0 +1,221 @@
+name: Build sami branch
+
+on:
+  push:
+    branches:
+      - sami
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# bun version is read from the root package.json packageManager field by setup-bun.
+
+jobs:
+  version:
+    name: Compute version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+      timestamp: ${{ steps.version.outputs.timestamp }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: sjawhar/.github/.github/actions/sami-version@v1
+        id: version
+        with:
+          source: bun
+          manifest_path: packages/opencode/package.json
+
+  check:
+    name: Wait for checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Wait for typecheck
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.sha }}
+          check-name: typecheck
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 15
+      # Poll the latest test workflow run on this SHA, looking specifically at its
+      # unit (linux) job. We use workflow runs (not check-runs) and filter to the
+      # latest run on this SHA so a stale failed run from a previous trigger doesn't
+      # short-circuit us. lewagon/wait-on-check-action exits early when the check is
+      # missing on first poll, which races with the test workflow's job registration.
+      #
+      # We intentionally gate ONLY on unit (linux), not on the full test workflow
+      # conclusion. unit (windows) has been a continuous failure on sami for weeks
+      # (Windows path normalization, Effect 30s timeouts on slow runners) and we
+      # treat it as out of scope for the fork — it does not block sami releases.
+      # Sami builds against Linux/macOS hosts; Windows is an upstream concern.
+      - name: Wait for unit (linux)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF: ${{ github.sha }}
+        run: |
+          deadline=$((SECONDS + 1200))  # 20 min total budget
+          while [ $SECONDS -lt $deadline ]; do
+            run_id=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/test.yml/runs?head_sha=${REF}&per_page=10" \
+              --jq '[.workflow_runs[]] | sort_by(.run_started_at) | last | .id // empty')
+            if [ -z "$run_id" ]; then
+              echo "test workflow has not yet started a run on ${REF}, waiting..."
+              sleep 15
+              continue
+            fi
+            line=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs?per_page=50" \
+              --jq '.jobs[] | select(.name == "unit (linux)") | "\(.status)\t\(.conclusion // "")"' | head -1)
+            if [ -z "$line" ]; then
+              echo "test run ${run_id} has not yet registered unit (linux), waiting..."
+              sleep 15
+              continue
+            fi
+            status=$(echo "$line" | cut -f1)
+            conclusion=$(echo "$line" | cut -f2)
+            echo "test run ${run_id}: unit (linux) status=$status conclusion=$conclusion"
+            if [ "$status" = "completed" ]; then
+              case "$conclusion" in
+                success|skipped|neutral) exit 0 ;;
+                *) exit 1 ;;
+              esac
+            fi
+            sleep 15
+          done
+          echo "timed out after 20 minutes waiting for unit (linux)"
+          exit 1
+        shell: bash
+
+  build-frontend:
+    name: Build frontend
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - run: bun install
+      - run: bun run build -- --base /opencode/${{ needs.version.outputs.tag }}/
+        working-directory: packages/app
+      - name: Upload frontend dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: packages/app/dist/
+
+  deploy-frontend:
+    name: Deploy frontend to GitHub Pages
+    needs: [version, check, build-frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend-dist
+
+      - name: Deploy to gh-pages branch
+        run: |
+          TAG="${{ needs.version.outputs.tag }}"
+
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          REPO_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
+
+          # Clone gh-pages branch or create it
+          if git clone --depth 1 --branch gh-pages "${REPO_URL}" pages-repo 2>/dev/null; then
+            echo "Cloned existing gh-pages branch"
+          else
+            mkdir pages-repo && cd pages-repo
+            git init
+            git checkout --orphan gh-pages
+            touch .nojekyll
+            git add .nojekyll
+            git commit -m "Initialize gh-pages"
+            git remote add origin "${REPO_URL}"
+            cd ..
+          fi
+
+          # Add versioned directory
+          mkdir -p "pages-repo/${TAG}"
+          cp -r frontend-dist/* "pages-repo/${TAG}/"
+          touch pages-repo/.nojekyll
+
+          cd pages-repo
+          git add .
+          git commit -m "Deploy frontend ${TAG}"
+          git push origin gh-pages
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  build-cli:
+    name: Build CLI
+    needs: [version, check, build-frontend]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - run: bun install
+
+      - name: Build CLI binaries
+        env:
+          OPENCODE_VERSION: ${{ needs.version.outputs.version }}-sami.${{ needs.version.outputs.timestamp }}
+          # Pin the auto-installed @opencode-ai/plugin to the upstream base version (e.g. 1.14.26)
+          # rather than our fork's binary version (e.g. 1.14.26-sami.<timestamp>) which is not
+          # published on npm. See packages/core/src/installation/version.ts for the constant and
+          # packages/opencode/src/config/config.ts for the consumer.
+          OPENCODE_PLUGIN_VERSION: ${{ needs.version.outputs.version }}
+        run: bun run script/build.ts
+        working-directory: packages/opencode
+
+      - name: Create direct-load launcher scripts
+        run: |
+          TAG="${{ needs.version.outputs.tag }}"
+          FRONTEND_URL="https://sjawhar.github.io/opencode/${TAG}/"
+          for dir in packages/opencode/dist/opencode-*/bin/; do
+            {
+              echo '#!/bin/sh'
+              printf 'export OPENCODE_WEB_URL="%s"\n' "${FRONTEND_URL}"
+              echo 'exec "$(dirname $0)/opencode" web --web-mode direct "$@"'
+            } > "${dir}launch-web.sh"
+            chmod +x "${dir}launch-web.sh"
+          done
+          echo "Created launcher scripts in $(ls -d packages/opencode/dist/opencode-*/bin/ | wc -l) platform directories"
+
+      - name: Package binaries
+        run: |
+          TAG="${{ needs.version.outputs.tag }}"
+          cd packages/opencode/dist
+          for dir in opencode-*/; do
+            name="${dir%/}"
+            tar czf "${name}-${TAG}.tar.gz" -C "${dir}bin" .
+          done
+          ls -la *.tar.gz
+          mv *.tar.gz ../../../
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencode-cli
+          path: "*.tar.gz"
+
+  release:
+    name: Create release
+    needs: [version, build-cli]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download CLI artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: opencode-cli
+          path: artifacts
+
+      - uses: sjawhar/.github/.github/actions/sami-release@v1
+        with:
+          tag: ${{ needs.version.outputs.tag }}
+          files: artifacts/*

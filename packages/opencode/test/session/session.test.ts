@@ -6,7 +6,7 @@ import * as Log from "@opencode-ai/core/util/log"
 import { Instance } from "../../src/project/instance"
 import { WithInstance } from "../../src/project/with-instance"
 import { MessageV2 } from "../../src/session/message-v2"
-import { MessageID, PartID, type SessionID } from "../../src/session/schema"
+import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { AppRuntime } from "../../src/effect/app-runtime"
 import { tmpdir } from "../fixture/fixture"
 
@@ -182,5 +182,58 @@ describe("Session", () => {
     })
 
     expect(missing).toBe(true)
+  })
+})
+
+describe("custom session ID", () => {
+  test("round-trip: create with custom id returns same id and is retrievable", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await WithInstance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const customID = SessionID.descending() // generate fresh valid id
+        const created = await create({ id: customID })
+        expect(created.id).toBe(customID)
+        const fetched = await get(customID)
+        expect(fetched.id).toBe(customID)
+      },
+    })
+  })
+
+  test("creating with duplicate id throws DuplicateIDError", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await WithInstance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const customID = SessionID.descending()
+        await create({ id: customID })
+
+        let caught: unknown
+        try {
+          await create({ id: customID })
+        } catch (e) {
+          caught = e
+        }
+        expect(caught).toBeInstanceOf(SessionNs.DuplicateIDError)
+        expect((caught as InstanceType<typeof SessionNs.DuplicateIDError>).data.id).toBe(customID)
+      },
+    })
+  })
+
+  test("creating with malformed id (wrong prefix) throws", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await WithInstance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        let caught: unknown
+        try {
+          await create({ id: "not-a-session-id" as never })
+        } catch (e) {
+          caught = e
+        }
+        expect(caught).toBeInstanceOf(Error)
+        expect((caught as Error).message).toMatch(/does not start with ses\b/)
+      },
+    })
   })
 })
