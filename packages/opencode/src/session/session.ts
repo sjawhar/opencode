@@ -24,9 +24,11 @@ import { PartTable, SessionTable } from "./session.sql"
 import { ProjectTable } from "../project/project.sql"
 import { Storage } from "@/storage/storage"
 import * as Log from "@opencode-ai/core/util/log"
+import { NamedError } from "@opencode-ai/core/util/error"
 import { MessageV2 } from "./message-v2"
 import type { InstanceContext } from "../project/instance"
 import { InstanceState } from "@/effect/instance-state"
+import { Instance } from "@/project/instance"
 import { Snapshot } from "@/snapshot"
 import { ProjectID } from "../project/schema"
 import { WorkspaceID } from "../control-plane/schema"
@@ -37,8 +39,10 @@ import type { Provider } from "@/provider/provider"
 import { Permission } from "@/permission"
 import { Global } from "@opencode-ai/core/global"
 import { Effect, Layer, Option, Context, Schema, Types } from "effect"
+import { z } from "zod"
 import { zod } from "@opencode-ai/core/effect-zod"
 import { NonNegativeInt, optionalOmitUndefined, withStatics } from "@opencode-ai/core/schema"
+import { makeRuntime } from "@/effect/run-service"
 
 const log = Log.create({ service: "session" })
 
@@ -217,6 +221,7 @@ export type GlobalInfo = Types.DeepMutable<Schema.Schema.Type<typeof GlobalInfo>
 
 export const CreateInput = Schema.optional(
   Schema.Struct({
+    id: Schema.optional(SessionID),
     parentID: Schema.optional(SessionID),
     title: Schema.optional(Schema.String),
     agent: Schema.optional(Schema.String),
@@ -423,9 +428,17 @@ export class BusyError extends Error {
 
 export type NotFound = InstanceType<typeof NotFoundError>
 
+export const DuplicateIDError = NamedError.create(
+  "DuplicateIDError",
+  z.object({
+    id: z.string(),
+  }),
+)
+
 export interface Interface {
   readonly list: (input?: ListInput) => Effect.Effect<Info[]>
   readonly create: (input?: {
+    id?: SessionID
     parentID?: SessionID
     title?: string
     agent?: string
@@ -521,6 +534,14 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
 
       yield* sync.run(Event.Created, { sessionID: result.id, info: result })
 
+      if (!input.parentID) {
+        try {
+          Database.session(result.id)
+        } catch (e) {
+          log.error("failed to create per-tree db", { error: e })
+        }
+      }
+
       if (!Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) {
         // This only exist for backwards compatibility. We should not be
         // manually publishing this event; it is a sync event now
@@ -596,19 +617,17 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
       }).pipe(Effect.withSpan("Session.updatePart"))
 
     const getPart: Interface["getPart"] = Effect.fn("Session.getPart")(function* (input) {
-      const row = Database.use((db) =>
-        db
-          .select()
-          .from(PartTable)
-          .where(
-            and(
-              eq(PartTable.session_id, input.sessionID),
-              eq(PartTable.message_id, input.messageID),
-              eq(PartTable.id, input.partID),
-            ),
-          )
-          .get(),
-      )
+      const row = Database.resolveSession(input.sessionID)
+        .select()
+        .from(PartTable)
+        .where(
+          and(
+            eq(PartTable.session_id, input.sessionID),
+            eq(PartTable.message_id, input.messageID),
+            eq(PartTable.id, input.partID),
+          ),
+        )
+        .get()
       if (!row) return
       return {
         ...row.data,
@@ -619,6 +638,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
     })
 
     const create = Effect.fn("Session.create")(function* (input?: {
+      id?: SessionID
       parentID?: SessionID
       title?: string
       agent?: string
@@ -629,6 +649,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
       const ctx = yield* InstanceState.context
       const workspace = yield* InstanceState.workspaceID
       return yield* createNext({
+        id: input?.id,
         parentID: input?.parentID,
         directory: ctx.directory,
         path: sessionPath(ctx.worktree, ctx.directory),
@@ -813,6 +834,24 @@ export const defaultLayer = layer.pipe(
   Layer.provide(SyncEvent.defaultLayer),
 )
 
+const { runPromise } = makeRuntime(Service, defaultLayer)
+
+export async function create(input?: CreateInput) {
+  return runPromise((svc) => svc.create(input))
+}
+
+export async function remove(sessionID: SessionID) {
+  return runPromise((svc) => svc.remove(sessionID))
+}
+
+export async function updateMessage<T extends MessageV2.Info>(msg: T) {
+  return runPromise((svc) => svc.updateMessage(msg))
+}
+
+export async function updatePart<T extends MessageV2.Part>(part: T) {
+  return runPromise((svc) => svc.updatePart(part))
+}
+
 function* listByProject(
   input: ListInput & {
     projectID: ProjectID
@@ -862,6 +901,11 @@ function* listByProject(
   for (const row of rows) {
     yield fromRow(row)
   }
+}
+
+export function* list(input?: ListInput) {
+  const project = Instance.project
+  yield* listByProject({ projectID: project.id, ...(input ?? {}) })
 }
 
 export function* listGlobal(input?: {

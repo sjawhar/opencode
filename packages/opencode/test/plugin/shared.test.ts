@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { parsePluginSpecifier } from "../../src/plugin/shared"
+import { checkPluginCompatibility, parsePluginSpecifier } from "../../src/plugin/shared"
 
 describe("parsePluginSpecifier", () => {
   test("parses standard npm package without version", () => {
@@ -84,5 +84,30 @@ describe("parsePluginSpecifier", () => {
       pkg: "@opencode/acme",
       version: "latest",
     })
+  })
+})
+
+describe("checkPluginCompatibility", () => {
+  // Sami fork builds publish versions like 1.14.26-sami.YYYYMMDD-HHMMSS. By default,
+  // semver excludes prerelease versions from ranges that don't include a prerelease,
+  // which would silently reject every plugin that declares engines.opencode.
+  test("accepts a prerelease running version when engines.opencode is a stable range", async () => {
+    await expect(
+      checkPluginCompatibility("unused", "1.14.26-sami.20260430-174813", {
+        dir: "unused",
+        pkg: "unused",
+        json: { engines: { opencode: ">=1.3.13" } },
+      }),
+    ).resolves.toBeUndefined()
+  })
+
+  test("still rejects when the running version is below the required range", async () => {
+    await expect(
+      checkPluginCompatibility("unused", "1.2.0", {
+        dir: "unused",
+        pkg: "unused",
+        json: { engines: { opencode: ">=1.3.13" } },
+      }),
+    ).rejects.toThrow(/Plugin requires opencode/)
   })
 })

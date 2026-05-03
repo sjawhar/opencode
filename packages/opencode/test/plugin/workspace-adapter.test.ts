@@ -7,7 +7,9 @@ import { disposeAllInstances, provideTmpdirInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 
 const disableDefault = process.env.OPENCODE_DISABLE_DEFAULT_PLUGINS
+const configContent = process.env.OPENCODE_CONFIG_CONTENT
 process.env.OPENCODE_DISABLE_DEFAULT_PLUGINS = "1"
+delete process.env.OPENCODE_CONFIG_CONTENT
 
 const { Flag } = await import("@opencode-ai/core/flag/flag")
 const { Plugin } = await import("../../src/plugin/index")
@@ -34,6 +36,11 @@ afterAll(() => {
     delete process.env.OPENCODE_DISABLE_DEFAULT_PLUGINS
   } else {
     process.env.OPENCODE_DISABLE_DEFAULT_PLUGINS = disableDefault
+  }
+  if (configContent === undefined) {
+    delete process.env.OPENCODE_CONFIG_CONTENT
+  } else {
+    process.env.OPENCODE_CONFIG_CONTENT = configContent
   }
 
   Flag.OPENCODE_EXPERIMENTAL_WORKSPACES = experimental

@@ -1,5 +1,6 @@
 import { afterEach, expect } from "bun:test"
 import { Cause, Effect, Exit, Fiber, Layer } from "effect"
+import { Bus } from "../../src/bus"
 import { Question } from "../../src/question"
 import { Instance } from "../../src/project/instance"
 import { WithInstance } from "../../src/project/with-instance"
@@ -10,7 +11,10 @@ import { SessionID } from "../../src/session/schema"
 import { testEffect } from "../lib/effect"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 
-const it = testEffect(Layer.mergeAll(Question.defaultLayer, CrossSpawnSpawner.defaultLayer))
+const bus = Bus.layer
+const it = testEffect(
+  Layer.mergeAll(Question.layer.pipe(Layer.provide(bus)), bus, CrossSpawnSpawner.defaultLayer),
+)
 
 const askEffect = Effect.fn("QuestionTest.ask")(function* (input: {
   sessionID: SessionID
@@ -250,6 +254,45 @@ it.instance(
 it.instance("reject - does nothing for unknown requestID", () => rejectEffect(QuestionID.make("que_unknown")), {
   git: true,
 })
+
+it.instance(
+  "interrupt - publishes Rejected event so TUI orphans get dismissed",
+  () =>
+    Effect.gen(function* () {
+      const bus = yield* Bus.Service
+      const received: { sessionID: SessionID; requestID: QuestionID }[] = []
+      const off = yield* bus.subscribeCallback(Question.Event.Rejected, (evt) => {
+        received.push({ sessionID: evt.properties.sessionID, requestID: evt.properties.requestID })
+      })
+
+      const fiber = yield* askEffect({
+        sessionID: SessionID.make("ses_test"),
+        questions: [
+          {
+            question: "What would you like to do?",
+            header: "Action",
+            options: [{ label: "Option 1", description: "First option" }],
+          },
+        ],
+      }).pipe(Effect.forkScoped)
+
+      const pending = yield* waitForPending(1)
+      const requestID = pending[0].id
+
+      // Simulate the tool execution being interrupted before the user replies
+      // (session ended, parent killed, scope torn down, etc.).
+      yield* Fiber.interrupt(fiber)
+
+      // Wait briefly for finalizer to publish the synthetic Rejected event.
+      yield* Effect.sleep("10 millis")
+      off()
+
+      expect(received).toEqual([{ sessionID: SessionID.make("ses_test"), requestID }])
+      const after = yield* listEffect
+      expect(after.length).toBe(0)
+    }),
+  { git: true },
+)
 
 // multiple questions tests
 

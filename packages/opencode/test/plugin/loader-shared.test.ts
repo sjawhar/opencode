@@ -7,21 +7,29 @@ import { disposeAllInstances, provideInstance, tmpdir } from "../fixture/fixture
 import { Filesystem } from "@/util/filesystem"
 
 const disableDefault = process.env.OPENCODE_DISABLE_DEFAULT_PLUGINS
+const configContent = process.env.OPENCODE_CONFIG_CONTENT
 process.env.OPENCODE_DISABLE_DEFAULT_PLUGINS = "1"
+delete process.env.OPENCODE_CONFIG_CONTENT
 
 const { Plugin } = await import("../../src/plugin/index")
 const { PluginLoader } = await import("../../src/plugin/loader")
 const { readPackageThemes } = await import("../../src/plugin/shared")
 const { Bus } = await import("../../src/bus")
+const { Skill } = await import("../../src/skill")
 const { Npm } = await import("@opencode-ai/core/npm")
 const { TestConfig } = await import("../fixture/config")
 
 afterAll(() => {
   if (disableDefault === undefined) {
     delete process.env.OPENCODE_DISABLE_DEFAULT_PLUGINS
+  } else {
+    process.env.OPENCODE_DISABLE_DEFAULT_PLUGINS = disableDefault
+  }
+  if (configContent === undefined) {
+    delete process.env.OPENCODE_CONFIG_CONTENT
     return
   }
-  process.env.OPENCODE_DISABLE_DEFAULT_PLUGINS = disableDefault
+  process.env.OPENCODE_CONFIG_CONTENT = configContent
 })
 
 afterEach(async () => {
@@ -39,6 +47,7 @@ async function load(dir: string) {
     Effect.provide(
       Plugin.layer.pipe(
         Layer.provide(Bus.layer),
+        Layer.provide(Skill.defaultLayer),
         Layer.provide(
           TestConfig.layer({
             get: () =>
