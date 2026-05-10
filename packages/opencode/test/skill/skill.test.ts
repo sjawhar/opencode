@@ -18,7 +18,7 @@ const kit = testEffect(Layer.mergeAll(ToolRegistry.defaultLayer, node))
 
 const toolCtx: Tool.Context = {
   sessionID: SessionID.make("ses_test-plugin-skill"),
-  messageID: MessageID.make(""),
+  messageID: MessageID.make("msg_test-plugin-skill"),
   callID: "",
   agent: "build",
   abort: AbortSignal.any([]),
