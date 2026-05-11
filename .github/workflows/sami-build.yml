@@ -44,6 +44,12 @@ jobs:
       # latest run on this SHA so a stale failed run from a previous trigger doesn't
       # short-circuit us. lewagon/wait-on-check-action exits early when the check is
       # missing on first poll, which races with the test workflow's job registration.
+      #
+      # We intentionally gate ONLY on unit (linux), not on the full test workflow
+      # conclusion. unit (windows) has been a continuous failure on sami for weeks
+      # (Windows path normalization, Effect 30s timeouts on slow runners) and we
+      # treat it as out of scope for the fork — it does not block sami releases.
+      # Sami builds against Linux/macOS hosts; Windows is an upstream concern.
       - name: Wait for unit (linux)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
