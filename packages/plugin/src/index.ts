@@ -53,6 +53,13 @@ export type WorkspaceAdapter = {
   target(config: WorkspaceInfo): WorkspaceTarget | Promise<WorkspaceTarget>
 }
 
+export type SkillInfo = {
+  name: string
+  description: string
+  location: string
+  content: string
+}
+
 export type PluginInput = {
   client: ReturnType<typeof createOpencodeClient>
   project: Project
@@ -63,6 +70,23 @@ export type PluginInput = {
   }
   serverUrl: URL
   $: BunShell
+  skills: {
+    all(): Promise<SkillInfo[]>
+    get(name: string): Promise<SkillInfo | undefined>
+    dirs(): Promise<string[]>
+  }
+  /**
+   * Resolve the environment a session's child processes should receive, as
+   * contributed by every `shell.env` hook.
+   *
+   * A plugin that spawns a process on behalf of a session -- an MCP server, a
+   * terminal, a language server -- otherwise has only `process.env`, which
+   * belongs to the server and names no session. Session-scoped credential
+   * helpers cannot resolve their scope from that.
+   *
+   * Do not call during plugin load; the hook set is still being assembled.
+   */
+  sessionEnv(input: { sessionID: string; cwd?: string }): Promise<Record<string, string>>
 }
 
 export type PluginOptions = Record<string, unknown>

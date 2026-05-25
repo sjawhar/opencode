@@ -2230,10 +2230,14 @@ function Task(props: ToolProps) {
   const { navigate } = useRoute()
   const sync = useSync()
   const dialog = useDialog()
+  const [sessionMissing, setSessionMissing] = createSignal(false)
 
   onMount(() => {
     const sessionID = stringValue(props.metadata.sessionId)
-    if (sessionID && !sync.data.message[sessionID]?.length) void sync.session.sync(sessionID)
+    if (sessionID && !sync.data.message[sessionID]?.length)
+      void sync.session.sync(sessionID).catch(() => {
+        setSessionMissing(true)
+      })
   })
 
   const sessionID = createMemo(() => stringValue(props.metadata.sessionId))
@@ -2310,13 +2314,16 @@ function Task(props: ToolProps) {
       complete={stringValue(props.input.description)}
       pending="Delegating..."
       part={props.part}
-      onClick={() => {
-        if (sessionID()) {
-          navigate({ type: "session", sessionID: sessionID()! })
-        }
-        const status = retry()
-        if (status) void DialogAlert.show(dialog, "Retry Error", status.message)
-      }}
+      onClick={
+        sessionID() && !sessionMissing()
+          ? () => {
+              const id = sessionID()
+              if (id) navigate({ type: "session", sessionID: id })
+              const status = retry()
+              if (status) void DialogAlert.show(dialog, "Retry Error", status.message)
+            }
+          : undefined
+      }
     >
       {content()}
     </InlineTool>

@@ -193,6 +193,8 @@ const layer = Layer.effect(
     const locations = yield* LocationServiceMap.Service
     const decodeMessage = Schema.decodeUnknownEffect(SessionMessage.Message)
     const isDurableSessionEvent = Schema.is(SessionEvent.Durable)
+    const sessionDb = (sessionID: SessionSchema.ID) =>
+      Database.path() === ":memory:" ? Effect.succeed(db) : database.resolveSession(sessionID)
     const decode = (row: typeof SessionMessageTable.$inferSelect) =>
       decodeMessage({ ...row.data, id: row.id, type: row.type }).pipe(
         Effect.mapError(
@@ -210,11 +212,14 @@ const layer = Layer.effect(
         const recorded = yield* store.get(sessionID)
         if (recorded) return recorded
         const project = yield* projects.resolve(input.location.directory)
-        yield* db
-          .insert(ProjectTable)
-          .values({ id: project.id, worktree: project.directory, vcs: project.vcs?.type, sandboxes: [] })
-          .onConflictDoNothing()
-          .run()
+        yield* database
+          .writeWithBusyRetry(
+            db
+              .insert(ProjectTable)
+              .values({ id: project.id, worktree: project.directory, vcs: project.vcs?.type, sandboxes: [] })
+              .onConflictDoNothing()
+              .run(),
+          )
           .pipe(Effect.orDie)
         const now = Date.now()
         const info = SessionV1.SessionInfo.make({
@@ -303,11 +308,13 @@ const layer = Layer.effect(
       }),
       messages: Effect.fn("V2Session.messages")(function* (input) {
         yield* result.get(input.sessionID)
+        const target = yield* sessionDb(input.sessionID)
         const direction = input.cursor?.direction ?? "next"
         const requestedOrder = input.order ?? "desc"
         const order = direction === "previous" ? (requestedOrder === "asc" ? "desc" : "asc") : requestedOrder
-        const anchor = input.cursor
-          ? yield* db
+        const readPage = Effect.fnUntraced(function* (source: typeof db) {
+          const anchor = input.cursor
+            ? yield* source
               .select({ seq: SessionMessageTable.seq })
               .from(SessionMessageTable)
               .where(
@@ -315,24 +322,25 @@ const layer = Layer.effect(
               )
               .get()
               .pipe(Effect.orDie)
-          : undefined
-        if (input.cursor && !anchor) return []
-        const boundary = anchor
-          ? order === "asc"
-            ? gt(SessionMessageTable.seq, anchor.seq)
-            : lt(SessionMessageTable.seq, anchor.seq)
-          : undefined
-        const where = boundary
-          ? and(eq(SessionMessageTable.session_id, input.sessionID), boundary)
-          : eq(SessionMessageTable.session_id, input.sessionID)
-        const query = db
-          .select()
-          .from(SessionMessageTable)
-          .where(where)
-          .orderBy(order === "asc" ? asc(SessionMessageTable.seq) : desc(SessionMessageTable.seq))
-        const rows = yield* (input.limit === undefined ? query.all() : query.limit(input.limit).all()).pipe(
-          Effect.orDie,
-        )
+            : undefined
+          if (input.cursor && !anchor) return []
+          const boundary = anchor
+            ? order === "asc"
+              ? gt(SessionMessageTable.seq, anchor.seq)
+              : lt(SessionMessageTable.seq, anchor.seq)
+            : undefined
+          const where = boundary
+            ? and(eq(SessionMessageTable.session_id, input.sessionID), boundary)
+            : eq(SessionMessageTable.session_id, input.sessionID)
+          const query = source
+            .select()
+            .from(SessionMessageTable)
+            .where(where)
+            .orderBy(order === "asc" ? asc(SessionMessageTable.seq) : desc(SessionMessageTable.seq))
+          return yield* (input.limit === undefined ? query.all() : query.limit(input.limit).all()).pipe(Effect.orDie)
+        })
+        const shardRows = yield* readPage(target)
+        const rows = shardRows.length > 0 ? shardRows : yield* readPage(db)
         return yield* Effect.forEach(direction === "previous" ? rows.toReversed() : rows, decode)
       }),
       message: Effect.fn("V2Session.message")(function* (input) {
@@ -351,7 +359,7 @@ const layer = Layer.effect(
         ).pipe(Stream.filter((event): event is SessionEvent.DurableEvent => isDurableSessionEvent(event))),
       history: Effect.fn("V2Session.history")(function* (input) {
         yield* result.get(input.sessionID)
-        return yield* EventV2.readAggregate(db, {
+        return yield* EventV2.readAggregate(yield* sessionDb(input.sessionID), {
           ...input,
           aggregateID: input.sessionID,
           manifest: SessionDurable,
@@ -365,7 +373,7 @@ const layer = Layer.effect(
             const messageID = input.id ?? SessionMessage.ID.create()
             const delivery = input.delivery ?? "steer"
             const expected = { sessionID: input.sessionID, messageID, prompt, delivery }
-            const admitted = yield* SessionInput.admit(db, events, {
+            const admitted = yield* SessionInput.admit(yield* sessionDb(input.sessionID), events, {
               id: messageID,
               sessionID: input.sessionID,
               prompt,
@@ -379,6 +387,7 @@ const layer = Layer.effect(
             )
             if (!SessionInput.equivalent(admitted, expected))
               return yield* new PromptConflictError({ sessionID: input.sessionID, messageID })
+            yield* SessionInput.mirrorAdmitted(db, admitted)
             if (input.resume !== false) yield* execution.wake(admitted.sessionID)
             return admitted
           }),

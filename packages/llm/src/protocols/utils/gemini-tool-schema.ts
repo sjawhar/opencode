@@ -32,11 +32,19 @@ const sanitizeNode = (schema: unknown): unknown => {
   const result: Record<string, unknown> = Object.fromEntries(
     Object.entries(schema).map(([key, value]) => [
       key,
-      key === "enum" && Array.isArray(value) ? value.map(String) : sanitizeNode(value),
+      key === "enum" && Array.isArray(value)
+        ? value.map(String)
+        : key === "const" && (typeof value === "boolean" || typeof value === "number")
+          ? String(value)
+          : sanitizeNode(value),
     ]),
   )
 
-  if (Array.isArray(result.enum) && (result.type === "integer" || result.type === "number")) result.type = "string"
+  if (
+    (Array.isArray(result.enum) || result.const !== undefined) &&
+    (result.type === "integer" || result.type === "number" || result.type === "boolean")
+  )
+    result.type = "string"
 
   const properties = result.properties
   if (result.type === "object" && isRecord(properties) && Array.isArray(result.required)) {

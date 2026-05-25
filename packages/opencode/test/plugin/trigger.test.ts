@@ -1,4 +1,4 @@
-import { describe, expect } from "bun:test"
+import { afterAll, describe, expect } from "bun:test"
 import { Effect } from "effect"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Npm } from "@opencode-ai/core/npm"
@@ -18,16 +18,30 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { Skill } from "../../src/skill"
+import { SkillTest } from "../fake/skill"
+
+const configContent = process.env.OPENCODE_CONFIG_CONTENT
+delete process.env.OPENCODE_CONFIG_CONTENT
 
 const it = testEffect(
   AppNodeBuilder.build(LayerNode.group([Plugin.node, CrossSpawnSpawner.node]), [
     [Auth.node, AuthTest.empty],
     [Account.node, AccountTest.empty],
     [Npm.node, NpmTest.noop],
+    [Skill.node, SkillTest.empty],
     [RuntimeFlags.node, RuntimeFlags.layer({ disableDefaultPlugins: true })],
   ]),
 )
 const systemHook = "experimental.chat.system.transform"
+
+afterAll(() => {
+  if (configContent === undefined) {
+    delete process.env.OPENCODE_CONFIG_CONTENT
+    return
+  }
+  process.env.OPENCODE_CONFIG_CONTENT = configContent
+})
 
 function withProject<A, E, R>(source: string, self: Effect.Effect<A, E, R>) {
   return Effect.gen(function* () {
@@ -102,6 +116,48 @@ describe("plugin.trigger", () => {
       ].join("\n"),
       Effect.gen(function* () {
         expect(yield* triggerSystemTransform()).toEqual(["async"])
+      }),
+    ),
+  )
+})
+
+describe("pluginInput.sessionEnv", () => {
+  it.instance("resolves the env a session's child processes should receive", () =>
+    withProject(
+      [
+        "export default async (input) => ({",
+        '  "shell.env": async (hookInput, output) => {',
+        "    if (!hookInput.sessionID) return",
+        '    output.env.TOKEN_FILE = "/run/secretsd/" + hookInput.sessionID + ".token"',
+        "  },",
+        `  ${JSON.stringify(systemHook)}: async (_input, output) => {`,
+        '    const env = await input.sessionEnv({ sessionID: "ses_probe" })',
+        "    output.system.unshift(JSON.stringify(env))",
+        "  },",
+        "})",
+        "",
+      ].join("\n"),
+      Effect.gen(function* () {
+        expect(yield* triggerSystemTransform()).toEqual([
+          JSON.stringify({ TOKEN_FILE: "/run/secretsd/ses_probe.token" }),
+        ])
+      }),
+    ),
+  )
+
+  it.instance("contributes nothing when no hook claims the session", () =>
+    withProject(
+      [
+        "export default async (input) => ({",
+        `  ${JSON.stringify(systemHook)}: async (_input, output) => {`,
+        '    const env = await input.sessionEnv({ sessionID: "ses_probe" })',
+        "    output.system.unshift(JSON.stringify(env))",
+        "  },",
+        "})",
+        "",
+      ].join("\n"),
+      Effect.gen(function* () {
+        expect(yield* triggerSystemTransform()).toEqual(["{}"])
       }),
     ),
   )

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect } from "bun:test"
+import { afterEach, beforeEach, describe, expect } from "bun:test"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Effect, Layer } from "effect"
 import { HttpClientResponse } from "effect/unstable/http"
@@ -18,10 +18,17 @@ import { ModelV2 } from "@opencode-ai/core/model"
 import { httpApiLayer, requestInDirectory } from "./httpapi-layer"
 
 const it = testEffect(Layer.mergeAll(LayerNode.compile(LayerNode.group([Session.node, Database.node])), httpApiLayer))
+const originalPure = process.env.OPENCODE_PURE
 
 const text = (response: HttpClientResponse.HttpClientResponse) => response.text
 
+beforeEach(() => {
+  process.env.OPENCODE_PURE = "1"
+})
+
 afterEach(async () => {
+  if (originalPure === undefined) delete process.env.OPENCODE_PURE
+  else process.env.OPENCODE_PURE = originalPure
   await disposeAllInstances()
   await resetDatabase()
 })
@@ -49,8 +56,8 @@ const seedCorruptStepFinishPart = Effect.gen(function* () {
   })
   // Schema.Finite still rejects NaN at encode: exact mirror of the corrupt row
   // that broke the user's session in the OMO/Windows bug.
-  const { db } = yield* Database.Service
-  yield* db
+  const database = yield* Database.Service
+  yield* (yield* database.resolveSession(info.id))
     .update(PartTable)
     .set({
       data: {

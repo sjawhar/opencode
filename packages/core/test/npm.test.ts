@@ -28,10 +28,12 @@ describe("Npm.sanitize", () => {
     expect(Npm.sanitize("prettier")).toBe("prettier")
   })
 
-  test("handles git https specs", () => {
+  test("sanitizes ':' in URL specs (always, not just on Windows)", () => {
+    // bun's import resolver treats `foo:/bar` paths as URL schemes and bypasses
+    // registered plugins (like @opentui/solid's JSX transform), even when the path
+    // exists on disk. Cache paths must never contain a raw ':'.
     const spec = "acme@git+https://github.com/opencode/acme.git"
-    const expected = win ? "acme@git+https_//github.com/opencode/acme.git" : spec
-    expect(Npm.sanitize(spec)).toBe(expected)
+    expect(Npm.sanitize(spec)).toBe("acme@git+https_//github.com/opencode/acme.git")
   })
 })
 

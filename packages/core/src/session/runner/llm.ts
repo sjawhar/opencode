@@ -105,7 +105,10 @@ const layer = Layer.effect(
     const referenceGuidance = yield* ReferenceGuidance.Service
     const config = yield* Config.Service
     const snapshots = yield* Snapshot.Service
-    const db = (yield* Database.Service).db
+    const database = yield* Database.Service
+    const db = database.db
+    const sessionDb = (sessionID: SessionSchema.ID) =>
+      Database.path() === ":memory:" ? Effect.succeed(db) : database.resolveSession(sessionID)
     const compaction = SessionCompaction.make({ events, llm, config: yield* config.entries() })
     const getSession = Effect.fn("SessionRunner.getSession")(function* (sessionID: SessionSchema.ID) {
       const session = yield* store.get(sessionID)
@@ -177,27 +180,27 @@ const layer = Layer.effect(
       recoverOverflow?: typeof compaction.compactAfterOverflow,
     ) {
       const session = yield* getSession(sessionID)
+      const target = yield* sessionDb(session.id)
       if (session.location.directory !== location.directory || session.location.workspaceID !== location.workspaceID)
         return yield* Effect.interrupt
       const agent = yield* agents.select(session.agent)
-      const initialized = yield* SessionContextEpoch.initialize(db, loadSystemContext(agent), session.id)
+      const initialized = yield* SessionContextEpoch.initialize(target, loadSystemContext(agent), session.id)
       const toolFibers = yield* FiberSet.make<void, ToolOutputStore.Error>()
       let needsContinuation = false
       let currentStep = step
       if (promotion) {
-        const cutoff = yield* EventV2.latestSequence(db, session.id)
+        const cutoff = yield* EventV2.latestSequence(target, session.id)
         let promoted = 0
-        if (promotion === "steer") promoted = yield* SessionInput.promoteSteers(db, events, session.id, cutoff)
+        if (promotion === "steer") promoted = yield* SessionInput.promoteSteers(target, events, session.id, cutoff)
         if (promotion === "queue") {
-          promoted += Number(yield* SessionInput.promoteNextQueued(db, events, session.id))
-          promoted += yield* SessionInput.promoteSteers(db, events, session.id, cutoff)
+          promoted += Number(yield* SessionInput.promoteNextQueued(target, events, session.id))
+          promoted += yield* SessionInput.promoteSteers(target, events, session.id, cutoff)
         }
         if (promoted > 0) currentStep = 1
       }
-      const system =
-        initialized ?? (yield* SessionContextEpoch.prepare(db, events, loadSystemContext(agent), session.id))
+      const system = initialized ?? (yield* SessionContextEpoch.prepare(target, events, loadSystemContext(agent), session.id))
       const model = yield* models.resolve(session)
-      const entries = yield* SessionHistory.entriesForRunner(db, session.id, system.baselineSeq)
+      const entries = yield* SessionHistory.entriesForRunner(target, session.id, system.baselineSeq)
       const context = entries.map((entry) => entry.message)
       const isLastStep = agent.info?.steps !== undefined && currentStep >= agent.info.steps
       const toolMaterialization = isLastStep ? undefined : yield* tools.materialize(agent.info?.permissions)
@@ -384,8 +387,9 @@ const layer = Layer.effect(
       readonly sessionID: SessionSchema.ID
       readonly force: boolean
     }) {
-      const hasSteer = yield* SessionInput.hasPending(db, input.sessionID, "steer")
-      const hasQueue = hasSteer ? false : yield* SessionInput.hasPending(db, input.sessionID, "queue")
+      const target = yield* sessionDb(input.sessionID)
+      const hasSteer = yield* SessionInput.hasPending(target, input.sessionID, "steer")
+      const hasQueue = hasSteer ? false : yield* SessionInput.hasPending(target, input.sessionID, "queue")
       if (!input.force && !hasSteer && !hasQueue) return
       yield* failInterruptedTools(input.sessionID)
       let promotion: SessionInput.Delivery | undefined = hasSteer ? "steer" : hasQueue ? "queue" : undefined
@@ -398,9 +402,9 @@ const layer = Layer.effect(
           needsContinuation = result.needsContinuation
           step = result.step + 1
           promotion = "steer"
-          if (!needsContinuation) needsContinuation = yield* SessionInput.hasPending(db, input.sessionID, "steer")
+          if (!needsContinuation) needsContinuation = yield* SessionInput.hasPending(target, input.sessionID, "steer")
         }
-        shouldRun = yield* SessionInput.hasPending(db, input.sessionID, "queue")
+        shouldRun = yield* SessionInput.hasPending(target, input.sessionID, "queue")
         promotion = shouldRun ? "queue" : undefined
       }
     })

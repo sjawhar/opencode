@@ -179,7 +179,7 @@ export const layerWith = (options?: LayerOptions) =>
       const projectors = new Map<string, Subscriber[]>()
       // TODO: Bind durable projectors to exact type+version before supporting incompatible historical payloads.
       const listeners = new Array<Subscriber>()
-      const { db } = yield* Database.Service
+      const { db, resolveSession } = yield* Database.Service
 
       const getOrCreate = (definition: Definition) =>
         Effect.gen(function* () {
@@ -233,14 +233,18 @@ export const layerWith = (options?: LayerOptions) =>
                   }),
                 )
               }
+              // Route the durable event write to the session's shard (session aggregates)
+              // so per-turn writes stop contending on the global DB write lock; non-session
+              // aggregates fall back to the global db. Matches the projectors, which already
+              // resolve the same cached shard connection via resolveSession.
+              const target = Database.path() === ":memory:" ? db : yield* resolveSession(aggregateID)
               const list = projectors.get(event.type) ?? []
               return yield* Effect.uninterruptible(
                 Effect.gen(function* () {
-                  const committed = yield* db
-                    .transaction(
+                  const committed = yield* target.transaction(
                       () =>
                         Effect.gen(function* () {
-                          const row = yield* db
+                          const row = yield* target
                             .select({ seq: EventSequenceTable.seq, ownerID: EventSequenceTable.owner_id })
                             .from(EventSequenceTable)
                             .where(eq(EventSequenceTable.aggregate_id, aggregateID))
@@ -260,7 +264,7 @@ export const layerWith = (options?: LayerOptions) =>
                             )
                           }
                           if (input && input.seq <= latest) {
-                            const stored = yield* db
+                            const stored = yield* target
                               .select()
                               .from(EventTable)
                               .where(and(eq(EventTable.aggregate_id, aggregateID), eq(EventTable.seq, input.seq)))
@@ -272,7 +276,7 @@ export const layerWith = (options?: LayerOptions) =>
                               isDeepStrictEqual(stored.data, encoded)
                             ) {
                               if (input.ownerID && row?.ownerID == null) {
-                                yield* db
+                                yield* target
                                   .update(EventSequenceTable)
                                   .set({ owner_id: input.ownerID })
                                   .where(eq(EventSequenceTable.aggregate_id, aggregateID))
@@ -300,7 +304,7 @@ export const layerWith = (options?: LayerOptions) =>
                               }),
                             )
                           }
-                          const stored = yield* db
+                          const stored = yield* target
                             .select({ aggregateID: EventTable.aggregate_id, seq: EventTable.seq })
                             .from(EventTable)
                             .where(eq(EventTable.id, event.id))
@@ -321,7 +325,7 @@ export const layerWith = (options?: LayerOptions) =>
                             yield* projector(committed)
                           }
                           if (commit) yield* commit(seq)
-                          yield* db
+                          yield* target
                             .insert(EventSequenceTable)
                             .values([{ aggregate_id: aggregateID, seq, owner_id: input?.ownerID }])
                             .onConflictDoUpdate({
@@ -333,7 +337,7 @@ export const layerWith = (options?: LayerOptions) =>
                             })
                             .run()
                             .pipe(Effect.orDie)
-                          yield* db
+                          yield* target
                             .insert(EventTable)
                             .values([
                               {
@@ -512,23 +516,29 @@ export const layerWith = (options?: LayerOptions) =>
       }
 
       function remove(aggregateID: string) {
-        return db
-          .transaction(() =>
-            Effect.gen(function* () {
-              yield* db.delete(EventSequenceTable).where(eq(EventSequenceTable.aggregate_id, aggregateID)).run()
-              yield* db.delete(EventTable).where(eq(EventTable.aggregate_id, aggregateID)).run()
-            }),
-          )
-          .pipe(Effect.orDie)
+        return Effect.gen(function* () {
+          const target = Database.path() === ":memory:" ? db : yield* resolveSession(aggregateID)
+          yield* target
+            .transaction(() =>
+              Effect.gen(function* () {
+                yield* target.delete(EventSequenceTable).where(eq(EventSequenceTable.aggregate_id, aggregateID)).run()
+                yield* target.delete(EventTable).where(eq(EventTable.aggregate_id, aggregateID)).run()
+              }),
+            )
+            .pipe(Effect.orDie)
+        })
       }
 
       function claim(aggregateID: string, ownerID: string) {
-        return db
-          .update(EventSequenceTable)
-          .set({ owner_id: ownerID })
-          .where(eq(EventSequenceTable.aggregate_id, aggregateID))
-          .run()
-          .pipe(Effect.orDie)
+        return Effect.gen(function* () {
+          const target = Database.path() === ":memory:" ? db : yield* resolveSession(aggregateID)
+          yield* target
+            .update(EventSequenceTable)
+            .set({ owner_id: ownerID })
+            .where(eq(EventSequenceTable.aggregate_id, aggregateID))
+            .run()
+            .pipe(Effect.orDie)
+        })
       }
 
       const subscribe = <D extends Definition>(definition: D): Stream.Stream<Payload<D>> =>
@@ -539,28 +549,26 @@ export const layerWith = (options?: LayerOptions) =>
       const streamAll = (): Stream.Stream<Payload> => Stream.fromPubSub(pubsub.all)
 
       const readAfter = (aggregateID: string, after: number) =>
-        (options?.beforeAggregateRead?.(aggregateID) ?? Effect.void).pipe(
-          Effect.andThen(
-            db
-              .select()
-              .from(EventTable)
-              .where(and(eq(EventTable.aggregate_id, aggregateID), gt(EventTable.seq, after)))
-              .orderBy(asc(EventTable.seq))
-              .all(),
-          ),
-          Effect.orDie,
-          Effect.map((rows) =>
-            rows.map((event) =>
-              decodeSerializedEvent({
-                id: event.id,
-                aggregateID: event.aggregate_id,
-                seq: event.seq,
-                type: event.type,
-                data: event.data,
-              }),
-            ),
-          ),
-        )
+        Effect.gen(function* () {
+          const target = Database.path() === ":memory:" ? db : yield* resolveSession(aggregateID)
+          yield* options?.beforeAggregateRead?.(aggregateID) ?? Effect.void
+          const rows = yield* target
+            .select()
+            .from(EventTable)
+            .where(and(eq(EventTable.aggregate_id, aggregateID), gt(EventTable.seq, after)))
+            .orderBy(asc(EventTable.seq))
+            .all()
+            .pipe(Effect.orDie)
+          return rows.map((event) =>
+            decodeSerializedEvent({
+              id: event.id,
+              aggregateID: event.aggregate_id,
+              seq: event.seq,
+              type: event.type,
+              data: event.data,
+            }),
+          )
+        })
 
       const subscribeDurable = (aggregateID: string) =>
         Effect.gen(function* () {
@@ -634,5 +642,5 @@ export const layerWith = (options?: LayerOptions) =>
     }),
   )
 
-const layer = layerWith()
-export const node = makeGlobalNode({ service: Service, layer: layer, deps: [Database.node] })
+export const layer = layerWith()
+export const node = makeGlobalNode({ service: Service, layer, deps: [Database.node] })

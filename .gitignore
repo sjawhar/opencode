@@ -32,3 +32,10 @@ UPCOMING_CHANGELOG.md
 logs/
 *.bun-build
 tsconfig.tsbuildinfo
+
+.sisyphus/
+.omo/
+
+
+# opentui parser.worker.js copied here at build time (see packages/opencode/script/build.ts)
+packages/opencode/.build-assets/

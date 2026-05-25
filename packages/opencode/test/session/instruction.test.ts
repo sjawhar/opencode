@@ -143,6 +143,24 @@ describe("Instruction.resolve", () => {
     ),
   )
 
+  it.live("does not return instructions from a project-prefixed sibling directory", () =>
+    Effect.gen(function* () {
+      const parent = yield* tmpWithFiles({
+        "project/src/file.ts": "const x = 1",
+        "project-2/AGENTS.md": "# Sibling Instructions",
+        "project-2/src/file.ts": "const x = 1",
+      })
+      const project = path.join(parent, "project")
+      const siblingFile = path.join(parent, "project-2", "src", "file.ts")
+
+      yield* Effect.gen(function* () {
+        const svc = yield* Instruction.Service
+        const results = yield* svc.resolve([], siblingFile, MessageID.make("msg_message-sibling-1"))
+        expect(results).toEqual([])
+      }).pipe(provideInstance(project), provideInstruction({ home: parent, config: parent }))
+    }),
+  )
+
   it.live("doesn't reload AGENTS.md when reading it directly", () =>
     withFiles({ "subdir/AGENTS.md": "# Subdir Instructions", "subdir/nested/file.ts": "const x = 1" }, (dir) =>
       Effect.gen(function* () {

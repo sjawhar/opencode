@@ -11,6 +11,12 @@ const pluginInput = {
   },
   serverUrl: new URL("https://example.com"),
   $: {} as never,
+  skills: {
+    all: async () => [],
+    get: async () => undefined,
+    dirs: async () => [],
+  },
+  sessionEnv: async () => ({}),
 }
 
 function makeHookInput(overrides: { providerID?: string; apiId?: string; reasoning?: boolean }) {

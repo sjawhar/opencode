@@ -28,7 +28,8 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/v2
 const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
-    const { db } = yield* Database.Service
+    const database = yield* Database.Service
+    const { db } = database
     const decodeMessage = Schema.decodeUnknownEffect(SessionMessage.Message)
 
     return Service.of({
@@ -37,10 +38,12 @@ const layer = Layer.effect(
         return row ? fromRow(row) : undefined
       }),
       context: Effect.fn("SessionStore.context")(function* (sessionID) {
-        return yield* SessionHistory.load(db, sessionID)
+        const messages = yield* SessionHistory.load(yield* database.resolveSession(sessionID), sessionID)
+        return messages.length > 0 ? messages : yield* SessionHistory.load(db, sessionID)
       }),
       runnerContext: Effect.fn("SessionStore.runnerContext")(function* (sessionID, baselineSeq) {
-        return yield* SessionHistory.loadForRunner(db, sessionID, baselineSeq)
+        const messages = yield* SessionHistory.loadForRunner(yield* database.resolveSession(sessionID), sessionID, baselineSeq)
+        return messages.length > 0 ? messages : yield* SessionHistory.loadForRunner(db, sessionID, baselineSeq)
       }),
       message: Effect.fn("SessionStore.message")(function* (messageID) {
         const row = yield* db

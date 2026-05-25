@@ -179,23 +179,29 @@ describe("WebFetchTool registration", () => {
     }),
   )
 
-  it.effect("returns an error result when HTML-to-Markdown conversion throws", () =>
-    Effect.gen(function* () {
-      reset()
-      respond = () =>
-        Effect.succeed(
-          new Response("<div>".repeat(10_000) + "content" + "</div>".repeat(10_000), {
-            headers: { "content-type": "text/html" },
-          }),
-        )
-      const registry = yield* ToolRegistry.Service
-      const url = "https://1.1.1.1/deep-html"
+  it.effect(
+    "returns an error result when HTML-to-Markdown conversion throws",
+    () =>
+      Effect.gen(function* () {
+        reset()
+        respond = () =>
+          Effect.succeed(
+            new Response("<div>".repeat(10_000) + "content" + "</div>".repeat(10_000), {
+              headers: { "content-type": "text/html" },
+            }),
+          )
+        const registry = yield* ToolRegistry.Service
+        const url = "https://1.1.1.1/deep-html"
 
-      expect(yield* executeTool(registry, call({ url, format: "markdown" }))).toEqual({
-        type: "error",
-        value: `Unable to fetch ${url}`,
-      })
-    }),
+        expect(yield* executeTool(registry, call({ url, format: "markdown" }))).toEqual({
+          type: "error",
+          value: `Unable to fetch ${url}`,
+        })
+      }),
+    // Grinding through 10k nested divs is CPU-bound and shares a 4-vCPU CI
+    // runner with the rest of the suite; bun's default 5s per-test budget is
+    // routinely exceeded there. The test asserts the error result, not speed.
+    30_000,
   )
 
   it.effect("rejects declared and streamed oversized bodies", () =>

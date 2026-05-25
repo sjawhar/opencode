@@ -261,6 +261,12 @@ describe("plugin.codex", () => {
         },
         serverUrl: new URL("https://example.com"),
         $: {} as never,
+        skills: {
+          all: async () => [],
+          get: async () => undefined,
+          dirs: async () => [],
+        },
+        sessionEnv: async () => ({}),
       },
       {
         issuer: server.url.origin,

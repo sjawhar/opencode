@@ -110,7 +110,7 @@ export const recordingLayer = (
           return redactor.request({
             method: web.method,
             url: web.url,
-            headers: Object.fromEntries(web.headers.entries()),
+            headers: headersToRecord(web.headers),
             body: yield* Effect.promise(() => web.text()),
           })
         })
@@ -187,3 +187,11 @@ export const cassetteLayer = (name: string, options: RecordReplayOptions = {}): 
     Layer.provide(FetchHttpClient.layer),
     Layer.provide(NodeFileSystem.layer),
   )
+
+function headersToRecord(headers: Headers) {
+  const result: Record<string, string> = {}
+  headers.forEach((value, key) => {
+    result[key] = value
+  })
+  return result
+}

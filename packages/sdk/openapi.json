@@ -5449,6 +5449,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "DuplicateIDError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DuplicateIDError"
+                }
+              }
+            }
           }
         },
         "description": "Create a new OpenCode session for interacting with AI assistants and managing conversations.",
@@ -5459,6 +5469,10 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^ses"
+                  },
                   "parentID": {
                     "type": "string",
                     "pattern": "^ses"
@@ -15476,6 +15490,12 @@
             "$ref": "#/components/schemas/EventMcpBrowserOpenFailed"
           },
           {
+            "$ref": "#/components/schemas/EventMcpResourceUpdated"
+          },
+          {
+            "$ref": "#/components/schemas/EventMcpResourceListChanged"
+          },
+          {
             "$ref": "#/components/schemas/EventCommandExecuted"
           },
           {
@@ -19957,6 +19977,59 @@
                   },
                   "type": {
                     "type": "string",
+                    "enum": ["mcp.resource.updated"]
+                  },
+                  "properties": {
+                    "type": "object",
+                    "properties": {
+                      "server": {
+                        "type": "string"
+                      },
+                      "uri": {
+                        "type": "string"
+                      }
+                    },
+                    "required": ["server", "uri"],
+                    "additionalProperties": false
+                  }
+                },
+                "required": ["id", "type", "properties"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^evt_"
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": ["mcp.resource.list.changed"]
+                  },
+                  "properties": {
+                    "type": "object",
+                    "properties": {
+                      "server": {
+                        "type": "string"
+                      }
+                    },
+                    "required": ["server"],
+                    "additionalProperties": false
+                  }
+                },
+                "required": ["id", "type", "properties"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^evt_"
+                  },
+                  "type": {
+                    "type": "string",
                     "enum": ["command.executed"]
                   },
                   "properties": {
@@ -21001,6 +21074,15 @@
           "timeout": {
             "type": "integer",
             "exclusiveMinimum": 0
+          },
+          "subscriptions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "autoprompt": {
+            "type": "boolean"
           }
         },
         "required": ["type", "command"],
@@ -21065,6 +21147,15 @@
           "timeout": {
             "type": "integer",
             "exclusiveMinimum": 0
+          },
+          "subscriptions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "autoprompt": {
+            "type": "boolean"
           }
         },
         "required": ["type", "url"],
@@ -23081,6 +23172,27 @@
             }
           }
         }
+      },
+      "DuplicateIDError": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": ["DuplicateIDError"]
+          },
+          "data": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              }
+            },
+            "required": ["id"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["name", "data"],
+        "additionalProperties": false
       },
       "TextPartInput": {
         "type": "object",
@@ -36207,6 +36319,59 @@
               }
             },
             "required": ["mcpName", "url"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["id", "type", "properties"],
+        "additionalProperties": false
+      },
+      "EventMcpResourceUpdated": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^evt_"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["mcp.resource.updated"]
+          },
+          "properties": {
+            "type": "object",
+            "properties": {
+              "server": {
+                "type": "string"
+              },
+              "uri": {
+                "type": "string"
+              }
+            },
+            "required": ["server", "uri"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["id", "type", "properties"],
+        "additionalProperties": false
+      },
+      "EventMcpResourceListChanged": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^evt_"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["mcp.resource.list.changed"]
+          },
+          "properties": {
+            "type": "object",
+            "properties": {
+              "server": {
+                "type": "string"
+              }
+            },
+            "required": ["server"],
             "additionalProperties": false
           }
         },

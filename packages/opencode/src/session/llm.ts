@@ -56,6 +56,26 @@ export interface Interface {
   readonly stream: (input: StreamInput) => Stream.Stream<LLMEvent, unknown>
 }
 
+// Anthropic rejects a replayed thinking-block set that never co-occurred in one
+// response, with: "`thinking` or `redacted_thinking` blocks in the latest assistant
+// message cannot be modified". The reported message/content coordinates do not
+// correspond to the payload we sent, so match on the wording.
+function isThinkingImmutableError(error: unknown) {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : ""
+  return /cannot be modified|must remain as they were/i.test(message) && /thinking/i.test(message)
+}
+
+// Drops reasoning parts from every assistant message. Used only to recover from a
+// payload Anthropic has already rejected; the blocks cannot be repaired because
+// nothing records which of them came from the same provider emission.
+function stripThinkingFromPrompt(prompt: ModelMessage[]) {
+  return prompt.map((message) => {
+    if (message.role !== "assistant" || !Array.isArray(message.content)) return message
+    const content = message.content.filter((part) => part.type !== "reasoning")
+    return content.length > 0 ? { ...message, content } : message
+  })
+}
+
 export class Service extends Context.Service<Service, Interface>()("@opencode/LLM") {}
 
 export const use = serviceUse(Service)
@@ -112,6 +132,25 @@ const live: Layer.Layer<
         flags,
         isWorkflow,
       })
+
+      // The OpenAI Responses backend (including the ChatGPT/Codex OAuth path) rejects
+      // requests that carry too many tool definitions with a generic 500 server_error,
+      // which the retry policy then loops on indefinitely. Cap the tool set so the
+      // request is accepted. Built-in/core tools are registered first, so the slice
+      // preserves them and drops the long tail of MCP tools.
+      if (input.model.api.npm === "@ai-sdk/openai") {
+        const OPENAI_RESPONSES_TOOL_LIMIT = 128
+        const toolNames = Object.keys(prepared.tools)
+        if (toolNames.length > OPENAI_RESPONSES_TOOL_LIMIT) {
+          const kept = new Set(toolNames.slice(0, OPENAI_RESPONSES_TOOL_LIMIT))
+          yield* Effect.logWarning("tool count exceeds OpenAI Responses limit; capping", {
+            modelID: input.model.id,
+            total: toolNames.length,
+            kept: kept.size,
+          })
+          prepared.tools = Object.fromEntries(Object.entries(prepared.tools).filter(([name]) => kept.has(name)))
+        }
+      }
 
       // Wire up toolExecutor for DWS workflow models so that tool calls
       // from the workflow service are executed via opencode's tool system
@@ -287,6 +326,23 @@ const live: Layer.Layer<
               )
             }
             return args.params
+          },
+          // Anthropic rejects a replayed set of thinking blocks that never co-occurred
+          // in one response. An assistant message can accumulate blocks from separate
+          // provider emissions - a retried or restarted stream - and nothing recorded
+          // tells us which belong together, so the set cannot be repaired. Retry once
+          // without the turn's thinking: omitting it is allowed outside a tool-use
+          // turn, and beats failing the request.
+          async wrapStream({ doStream, params }) {
+            try {
+              return await doStream()
+            } catch (error) {
+              if (!isThinkingImmutableError(error)) throw error
+              // params.prompt is the provider-native message array.
+              // @ts-expect-error - the SDK types prompt loosely here
+              params.prompt = stripThinkingFromPrompt(params.prompt)
+              return await doStream()
+            }
           },
         },
         ...(input.capture ? [createHeadersCaptureMiddleware(input.capture) as unknown as LanguageModelMiddleware] : []),
