@@ -15,6 +15,7 @@ import { MessageV2 } from "./message-v2"
 import { isOverflow } from "./overflow"
 import { PartID } from "./schema"
 import type { SessionID } from "./schema"
+import { extractBillingSignals, deriveBillingMode } from "./billing"
 import { SessionRetry } from "./retry"
 import { SessionStatus } from "./status"
 import { SessionSummary } from "./summary"
@@ -65,6 +66,7 @@ type ToolCall = {
 }
 
 interface ProcessorContext extends Input {
+  capture: { headers?: Record<string, string> }
   toolcalls: Record<string, ToolCall>
   shouldBreak: boolean
   snapshot: string | undefined
@@ -100,10 +102,12 @@ const layer = Layer.effect(
       // may execute tools internally before emitting start-step events,
       // so capturing inside the event handler can be too late.
       const initialSnapshot = yield* snapshot.track()
+      const capture: { headers?: Record<string, string> } = {}
       const ctx: ProcessorContext = {
         assistantMessage: input.assistantMessage,
         sessionID: input.sessionID,
         model: input.model,
+        capture,
         toolcalls: {},
         shouldBreak: false,
         snapshot: initialSnapshot,
@@ -443,6 +447,14 @@ const layer = Layer.effect(
             ctx.assistantMessage.finish = value.reason
             ctx.assistantMessage.cost += usage.cost
             ctx.assistantMessage.tokens = usage.tokens
+            const billingSignals = extractBillingSignals(ctx.capture.headers ?? {})
+            const billingMode = deriveBillingMode(
+              ctx.assistantMessage.providerID,
+              ctx.assistantMessage.modelID,
+              billingSignals,
+            )
+            ctx.assistantMessage.billingSignals = billingSignals
+            ctx.assistantMessage.billingMode = billingMode
             yield* session.updatePart({
               id: PartID.ascending(),
               reason: value.reason,
@@ -452,6 +464,8 @@ const layer = Layer.effect(
               type: "step-finish",
               tokens: usage.tokens,
               cost: usage.cost,
+              billingMode,
+              billingSignals,
             })
             yield* session.updateMessage(ctx.assistantMessage)
             if (ctx.snapshot) {
@@ -637,7 +651,7 @@ const layer = Layer.effect(
             ctx.currentText = undefined
             ctx.reasoningMap = {}
             yield* status.set(ctx.sessionID, { type: "busy" })
-            const stream = llm.stream(streamInput)
+            const stream = llm.stream({ ...streamInput, capture: ctx.capture })
 
             yield* stream.pipe(
               Stream.tap((event) => handleEvent(event)),

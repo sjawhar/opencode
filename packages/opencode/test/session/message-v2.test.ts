@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { APICallError } from "ai"
+import { Schema } from "effect"
 import { MessageV2 } from "../../src/session/message-v2"
 import { ProviderTransform } from "@/provider/transform"
 import type { Provider } from "@/provider/provider"
@@ -1725,5 +1726,49 @@ describe("session.message-v2.latest", () => {
 
     expect(state.tasks).toHaveLength(1)
     expect(state.tasks[0]).toMatchObject({ type: "subtask", prompt: "inspect" })
+  })
+})
+
+describe("Assistant billingMode field", () => {
+  test("decodes a message with billingMode and billingSignals", () => {
+    const input = {
+      id: MessageID.make("msg_test"),
+      role: "assistant",
+      sessionID,
+      parentID: MessageID.make("msg_parent"),
+      modelID: ModelV2.ID.make("claude-opus-4-7"),
+      providerID: ProviderV2.ID.make("anthropic"),
+      mode: "build",
+      agent: "build",
+      path: { cwd: "/tmp", root: "/tmp" },
+      cost: 0,
+      tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
+      time: { created: 1, completed: 2 },
+      billingMode: "subscription" as const,
+      billingSignals: { anthropicOverageInUse: false },
+    }
+    const decoded = Schema.decodeUnknownSync(SessionV1.Assistant)(input)
+    expect(decoded.billingMode).toBe("subscription")
+    expect(decoded.billingSignals).toEqual({ anthropicOverageInUse: false })
+  })
+
+  test("decodes a message without billingMode (backwards compat)", () => {
+    const input = {
+      id: MessageID.make("msg_test2"),
+      role: "assistant",
+      sessionID,
+      parentID: MessageID.make("msg_parent"),
+      modelID: ModelV2.ID.make("claude-opus-4-7"),
+      providerID: ProviderV2.ID.make("anthropic"),
+      mode: "build",
+      agent: "build",
+      path: { cwd: "/tmp", root: "/tmp" },
+      cost: 0,
+      tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
+      time: { created: 1 },
+    }
+    const decoded = Schema.decodeUnknownSync(SessionV1.Assistant)(input)
+    expect(decoded.billingMode).toBeUndefined()
+    expect(decoded.billingSignals).toBeUndefined()
   })
 })

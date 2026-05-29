@@ -6,7 +6,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import { Context, Effect, Layer } from "effect"
 import * as Stream from "effect/Stream"
-import { streamText, wrapLanguageModel, type ModelMessage, type Tool } from "ai"
+import { streamText, wrapLanguageModel, type LanguageModelMiddleware, type ModelMessage, type Tool } from "ai"
 import type { LLMEvent } from "@opencode-ai/llm"
 import { LLMClient } from "@opencode-ai/llm/route"
 import type { LLMClientService } from "@opencode-ai/llm/route"
@@ -14,7 +14,6 @@ import { GitLabWorkflowLanguageModel } from "gitlab-ai-provider"
 import { ProviderTransform } from "@/provider/transform"
 import { Config } from "@/config/config"
 import type { Agent } from "@/agent/agent"
-import type { MessageV2 } from "./message-v2"
 import { Plugin } from "@/plugin"
 import { Permission } from "@/permission"
 import { EventV2Bridge } from "@/event-v2-bridge"
@@ -26,6 +25,7 @@ import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import * as Option from "effect/Option"
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
+import { createHeadersCaptureMiddleware } from "./billing"
 import { LLMAISDK } from "./llm/ai-sdk"
 import { LLMNativeRuntime } from "./llm/native-runtime"
 import { LLMRequestPrep } from "./llm/request"
@@ -45,6 +45,7 @@ export type StreamInput = {
   tools: Record<string, Tool>
   retries?: number
   toolChoice?: "auto" | "required" | "none"
+  capture?: { headers?: Record<string, string> }
 }
 
 export type StreamRequest = StreamInput & {
@@ -273,6 +274,23 @@ const live: Layer.Layer<
         "llm.provider": input.model.providerID,
         "llm.model": input.model.id,
       })
+      const middleware: LanguageModelMiddleware[] = [
+        {
+          specificationVersion: "v3" as const,
+          async transformParams(args) {
+            if (args.type === "stream") {
+              // @ts-expect-error AI SDK V3 prompt typing is narrower than ProviderTransform's normalized ModelMessage output.
+              args.params.prompt = ProviderTransform.message(
+                args.params.prompt,
+                input.model,
+                prepared.messageTransformOptions,
+              )
+            }
+            return args.params
+          },
+        },
+        ...(input.capture ? [createHeadersCaptureMiddleware(input.capture) as unknown as LanguageModelMiddleware] : []),
+      ]
       // Default runtime path: AI SDK owns provider execution and tool dispatch;
       // LLMAISDK.toLLMEvents below normalizes fullStream parts for the processor.
       return {
@@ -324,22 +342,7 @@ const live: Layer.Layer<
           messages: prepared.messages,
           model: wrapLanguageModel({
             model: language,
-            middleware: [
-              {
-                specificationVersion: "v3" as const,
-                async transformParams(args) {
-                  if (args.type === "stream") {
-                    // @ts-expect-error
-                    args.params.prompt = ProviderTransform.message(
-                      args.params.prompt,
-                      input.model,
-                      prepared.messageTransformOptions,
-                    )
-                  }
-                  return args.params
-                },
-              },
-            ],
+            middleware,
           }),
           experimental_telemetry: {
             isEnabled: cfg.experimental?.openTelemetry,

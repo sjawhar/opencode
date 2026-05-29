@@ -14,6 +14,15 @@ import { PermissionV1 } from "./permission"
 
 const Timestamp = Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0))
 
+const BillingMode = Schema.Literals(["subscription", "metered", "unknown"])
+const BillingSignals = Schema.Struct({
+  poolBillingLane: Schema.optional(Schema.Literals(["subscription", "metered"])),
+  anthropicOverageInUse: Schema.optional(Schema.Boolean),
+  codexPrimaryUsedPercent: Schema.optional(Schema.Number),
+  codexSecondaryUsedPercent: Schema.optional(Schema.Number),
+  codexCreditsBalance: Schema.optional(Schema.String),
+})
+
 export const MessageID = Schema.String.check(Schema.isStartsWith("msg")).pipe(
   Schema.brand("MessageID"),
   statics((schema) => ({ ascending: (id?: string) => schema.make(id ?? "msg_" + ascending()) })),
@@ -253,6 +262,8 @@ export const StepFinishPart = Schema.Struct({
       write: Schema.Finite,
     }),
   }),
+  billingMode: Schema.optional(BillingMode),
+  billingSignals: Schema.optional(BillingSignals),
 }).annotate({ identifier: "StepFinishPart" })
 export type StepFinishPart = Types.DeepMutable<Schema.Schema.Type<typeof StepFinishPart>>
 
@@ -482,6 +493,8 @@ export const Assistant = Schema.Struct({
   structured: Schema.optional(Schema.Any),
   variant: Schema.optional(Schema.String),
   finish: Schema.optional(Schema.String),
+  billingMode: Schema.optional(BillingMode),
+  billingSignals: Schema.optional(BillingSignals),
 }).annotate({ identifier: "AssistantMessage" })
 export type Assistant = Omit<Types.DeepMutable<Schema.Schema.Type<typeof Assistant>>, "error"> & {
   error?: AssistantError
