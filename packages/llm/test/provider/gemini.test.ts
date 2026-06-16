@@ -279,6 +279,65 @@ describe("Gemini route", () => {
     }),
   )
 
+  it.effect("coerces boolean and number const discriminators into string enums", () =>
+    Effect.gen(function* () {
+      const prepared = yield* LLMClient.prepare(
+        LLM.request({
+          id: "req_const_enum",
+          model,
+          prompt: "Use the tool.",
+          tools: [
+            {
+              name: "configure",
+              description: "Configure entries",
+              inputSchema: {
+                type: "object",
+                properties: {
+                  entries: {
+                    type: "array",
+                    items: {
+                      anyOf: [
+                        { type: "object", properties: { enabled: { type: "boolean", const: false } } },
+                        { type: "object", properties: { enabled: { type: "boolean", const: true } } },
+                      ],
+                    },
+                  },
+                  retries: { type: "integer", const: 3 },
+                },
+              },
+            },
+          ],
+        }),
+      )
+
+      expect(prepared.body).toMatchObject({
+        tools: [
+          {
+            functionDeclarations: [
+              {
+                parameters: {
+                  type: "object",
+                  properties: {
+                    entries: {
+                      type: "array",
+                      items: {
+                        anyOf: [
+                          { properties: { enabled: { type: "string", enum: ["false"] } } },
+                          { properties: { enabled: { type: "string", enum: ["true"] } } },
+                        ],
+                      },
+                    },
+                    retries: { type: "string", enum: ["3"] },
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      })
+    }),
+  )
+
   it.effect("parses text, reasoning, and usage stream fixtures", () =>
     Effect.gen(function* () {
       const body = sseEvents(
