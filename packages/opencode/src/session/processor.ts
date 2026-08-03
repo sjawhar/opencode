@@ -72,6 +72,10 @@ interface ProcessorContext extends Input {
   needsCompaction: boolean
   currentText: SessionV1.TextPart | undefined
   reasoningMap: Record<string, SessionV1.ReasoningPart>
+  // Reasoning parts written during the current provider attempt, so a retry can
+  // discard them. reasoningMap only holds in-flight blocks - completed ones are
+  // removed from it - so it cannot serve this purpose.
+  attemptReasoning: SessionV1.ReasoningPart[]
 }
 
 type StreamEvent = LLMEvent
@@ -111,6 +115,7 @@ const layer = Layer.effect(
         needsCompaction: false,
         currentText: undefined,
         reasoningMap: {},
+        attemptReasoning: [],
       }
       let aborted = false
 
@@ -288,6 +293,7 @@ const layer = Layer.effect(
               time: { start: Date.now() },
               metadata: value.providerMetadata,
             }
+            ctx.attemptReasoning.push(ctx.reasoningMap[value.id])
             yield* session.updatePart(ctx.reasoningMap[value.id])
             return
 
@@ -634,6 +640,19 @@ const layer = Layer.effect(
 
         return yield* Effect.gen(function* () {
           yield* Effect.gen(function* () {
+            // Each retry re-runs this block, so the reasoning parts the failed attempt
+            // already persisted have to be discarded. Leaving them merges thinking from
+            // two provider emissions into one assistant message, and Anthropic rejects
+            // that replayed set - the blocks are individually valid but never
+            // co-occurred in one response, so it cannot be repaired afterwards.
+            for (const part of ctx.attemptReasoning) {
+              yield* session.removePart({
+                sessionID: ctx.sessionID,
+                messageID: ctx.assistantMessage.id,
+                partID: part.id,
+              })
+            }
+            ctx.attemptReasoning = []
             ctx.currentText = undefined
             ctx.reasoningMap = {}
             yield* status.set(ctx.sessionID, { type: "busy" })

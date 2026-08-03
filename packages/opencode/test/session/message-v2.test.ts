@@ -601,7 +601,7 @@ describe("session.message-v2.toModelMessage", () => {
     ])
   })
 
-  test("omits provider metadata when assistant model differs", async () => {
+  test("drops reasoning entirely when assistant model differs", async () => {
     const userID = "m-user"
     const assistantID = "m-assistant"
 
@@ -660,7 +660,9 @@ describe("session.message-v2.toModelMessage", () => {
         role: "assistant",
         content: [
           { type: "text", text: "done" },
-          { type: "text", text: "thinking" },
+          // Reasoning from another model must not be replayed as assistant text:
+          // its signature is model-bound and cannot be revalidated, and surfacing
+          // it as text leaks internal reasoning into visible output.
           {
             type: "tool-call",
             toolCallId: "call-1",
@@ -682,6 +684,179 @@ describe("session.message-v2.toModelMessage", () => {
         ],
       },
     ])
+  })
+
+  const signedReasoning = (messageID: string, partID: string, text: string) =>
+    ({
+      ...basePart(messageID, partID),
+      type: "reasoning",
+      text,
+      metadata: { anthropic: { signature: `sig-${partID}` } },
+      time: { start: 0 },
+    }) as SessionV1.Part
+
+  const toolPart = (messageID: string, partID: string, callID: string) =>
+    ({
+      ...basePart(messageID, partID),
+      type: "tool",
+      callID,
+      tool: "bash",
+      state: {
+        status: "completed",
+        input: {},
+        output: "ok",
+        title: "Bash",
+        metadata: {},
+        time: { start: 0, end: 1 },
+      },
+    }) as SessionV1.Part
+
+  test("replays thinking from every assistant message, including earlier turns", async () => {
+    // Anthropic's rule: "Required: within a tool-use turn, pass thinking blocks
+    // back" and "within the latest assistant message ... you can't rearrange, edit,
+    // or partially drop them". Omission is modification, so nothing is filtered on
+    // the basis of age. Dropping earlier turns' thinking is merely *allowed* outside
+    // tool use, and getting that boundary wrong reproduces the 400.
+    const input: SessionV1.WithParts[] = [
+      {
+        info: userInfo("u-first"),
+        parts: [{ ...basePart("u-first", "u1"), type: "text", text: "first" }] as SessionV1.Part[],
+      },
+      {
+        info: assistantInfo("a-first", "u-first"),
+        parts: [signedReasoning("a-first", "a1", "earlier turn thinking")] as SessionV1.Part[],
+      },
+      {
+        info: userInfo("u-second"),
+        parts: [{ ...basePart("u-second", "u2"), type: "text", text: "second" }] as SessionV1.Part[],
+      },
+      {
+        info: assistantInfo("a-second", "u-second"),
+        parts: [signedReasoning("a-second", "a2", "current turn thinking")] as SessionV1.Part[],
+      },
+    ]
+
+    const result = await MessageV2.toModelMessages(input, model)
+    const reasoning = result.flatMap((message) =>
+      Array.isArray(message.content)
+        ? message.content.filter((part) => typeof part === "object" && part.type === "reasoning")
+        : [],
+    )
+    expect(reasoning).toStrictEqual([
+      { type: "reasoning", text: "earlier turn thinking", providerOptions: { anthropic: { signature: "sig-a1" } } },
+      { type: "reasoning", text: "current turn thinking", providerOptions: { anthropic: { signature: "sig-a2" } } },
+    ])
+  })
+
+  test("keeps thinking on every assistant message of a tool loop", async () => {
+    // A tool loop is ONE turn spanning many assistant messages, separated by
+    // synthetic user messages carrying only tool results. Every one of those
+    // messages must keep its thinking blocks.
+    const input: SessionV1.WithParts[] = [
+      {
+        info: userInfo("u-real"),
+        parts: [{ ...basePart("u-real", "u1"), type: "text", text: "go" }] as SessionV1.Part[],
+      },
+      {
+        info: assistantInfo("a-1", "u-real"),
+        parts: [signedReasoning("a-1", "a1", "loop step one"), toolPart("a-1", "t1", "call-1")] as SessionV1.Part[],
+      },
+      {
+        info: assistantInfo("a-2", "u-real"),
+        parts: [signedReasoning("a-2", "a2", "loop step two"), toolPart("a-2", "t2", "call-2")] as SessionV1.Part[],
+      },
+      {
+        info: assistantInfo("a-3", "u-real"),
+        parts: [signedReasoning("a-3", "a3", "loop step three")] as SessionV1.Part[],
+      },
+    ]
+
+    const result = await MessageV2.toModelMessages(input, model)
+    const reasoning = result.flatMap((message) =>
+      Array.isArray(message.content)
+        ? message.content.filter((part) => typeof part === "object" && part.type === "reasoning")
+        : [],
+    )
+    expect(reasoning.map((part) => (part as { text: string }).text)).toStrictEqual([
+      "loop step one",
+      "loop step two",
+      "loop step three",
+    ])
+  })
+
+  test("replays an accumulated multi-emission block set as-is", async () => {
+    // A message can accumulate blocks from separate provider emissions. History
+    // conversion must not try to repair that set - nothing records which blocks
+    // belong together. Recovery happens at request time in llm.ts.
+    const input: SessionV1.WithParts[] = [
+      {
+        info: userInfo("u-real"),
+        parts: [{ ...basePart("u-real", "u1"), type: "text", text: "go" }] as SessionV1.Part[],
+      },
+      {
+        info: assistantInfo("a-1", "u-real"),
+        parts: [
+          signedReasoning("a-1", "a1", "from one emission"),
+          signedReasoning("a-1", "a2", "from another emission"),
+          toolPart("a-1", "t1", "call-1"),
+        ] as SessionV1.Part[],
+      },
+    ]
+
+    const kept = await MessageV2.toModelMessages(input, model)
+    expect(
+      kept.flatMap((m) => (Array.isArray(m.content) ? m.content.filter((p) => p.type === "reasoning") : [])).length,
+    ).toBe(2)
+    expect(
+      kept.flatMap((m) => (Array.isArray(m.content) ? m.content.filter((p) => p.type === "tool-call") : [])).length,
+    ).toBe(1)
+  })
+
+  test("keeps every thinking block of the final assistant message", async () => {
+    // Interleaved thinking emits several signed blocks in one turn; dropping or
+    // reordering any of them within that turn is itself a modification.
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+
+    const input: SessionV1.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [
+          {
+            ...basePart(userID, "u1"),
+            type: "text",
+            text: "go",
+          },
+        ] as SessionV1.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "reasoning",
+            text: "first",
+            metadata: { anthropic: { signature: "sig-1" } },
+            time: { start: 0 },
+          },
+          {
+            ...basePart(assistantID, "a2"),
+            type: "reasoning",
+            text: "second",
+            metadata: { anthropic: { signature: "sig-2" } },
+            time: { start: 0 },
+          },
+        ] as SessionV1.Part[],
+      },
+    ]
+
+    const result = await MessageV2.toModelMessages(input, model)
+    const reasoning = result.flatMap((message) =>
+      Array.isArray(message.content)
+        ? message.content.filter((part) => typeof part === "object" && part.type === "reasoning")
+        : [],
+    )
+    expect(reasoning.map((part) => part.text)).toStrictEqual(["first", "second"])
   })
 
   test("replaces compacted tool output with placeholder", async () => {
@@ -1034,6 +1209,9 @@ describe("session.message-v2.toModelMessage", () => {
       {
         role: "assistant",
         content: [
+          // Thinking is preserved verbatim. The second message is still dropped
+          // entirely: step-start and reasoning alone are not content worth sending
+          // for an aborted turn.
           { type: "reasoning", text: "thinking", providerOptions: undefined },
           { type: "text", text: "partial answer" },
         ],

@@ -360,14 +360,17 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
             })
         }
         if (part.type === "reasoning") {
-          if (differentModel) {
-            if (part.text.trim().length > 0)
-              assistantMessage.parts.push({
-                type: "text",
-                text: part.text,
-              })
-            continue
-          }
+          // Anthropic requires the thinking blocks of the assistant turn being
+          // continued to be replayed exactly - "you can't rearrange, edit, or
+          // partially drop them" - so they are never filtered here by default.
+          // Recovery for an already-rejected payload happens at request time in
+          // llm.ts (stripThinkingFromPrompt), not here.
+          //
+          // A signature is bound to the model that produced it, so another model
+          // cannot revalidate it. Drop the block rather than downgrading it to an
+          // assistant text block, which both breaks the signed sequence and surfaces
+          // internal reasoning as visible output.
+          if (differentModel) continue
           assistantMessage.parts.push({
             type: "reasoning",
             text: part.text,
