@@ -63,6 +63,18 @@ export type PluginInput = {
   }
   serverUrl: URL
   $: BunShell
+  /**
+   * Resolve the environment a session's child processes should receive, as
+   * contributed by every `shell.env` hook.
+   *
+   * A plugin that spawns a process on behalf of a session -- an MCP server, a
+   * terminal, a language server -- otherwise has only `process.env`, which
+   * belongs to the server and names no session. Session-scoped credential
+   * helpers cannot resolve their scope from that.
+   *
+   * Do not call during plugin load; the hook set is still being assembled.
+   */
+  sessionEnv(input: { sessionID: string; cwd?: string }): Promise<Record<string, string>>
 }
 
 export type PluginOptions = Record<string, unknown>

@@ -106,3 +106,45 @@ describe("plugin.trigger", () => {
     ),
   )
 })
+
+describe("pluginInput.sessionEnv", () => {
+  it.instance("resolves the env a session's child processes should receive", () =>
+    withProject(
+      [
+        "export default async (input) => ({",
+        '  "shell.env": async (hookInput, output) => {',
+        "    if (!hookInput.sessionID) return",
+        '    output.env.TOKEN_FILE = "/run/secretsd/" + hookInput.sessionID + ".token"',
+        "  },",
+        `  ${JSON.stringify(systemHook)}: async (_input, output) => {`,
+        '    const env = await input.sessionEnv({ sessionID: "ses_probe" })',
+        "    output.system.unshift(JSON.stringify(env))",
+        "  },",
+        "})",
+        "",
+      ].join("\n"),
+      Effect.gen(function* () {
+        expect(yield* triggerSystemTransform()).toEqual([
+          JSON.stringify({ TOKEN_FILE: "/run/secretsd/ses_probe.token" }),
+        ])
+      }),
+    ),
+  )
+
+  it.instance("contributes nothing when no hook claims the session", () =>
+    withProject(
+      [
+        "export default async (input) => ({",
+        `  ${JSON.stringify(systemHook)}: async (_input, output) => {`,
+        '    const env = await input.sessionEnv({ sessionID: "ses_probe" })',
+        "    output.system.unshift(JSON.stringify(env))",
+        "  },",
+        "})",
+        "",
+      ].join("\n"),
+      Effect.gen(function* () {
+        expect(yield* triggerSystemTransform()).toEqual(["{}"])
+      }),
+    ),
+  )
+})

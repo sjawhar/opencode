@@ -163,6 +163,14 @@ const layer = Layer.effect(
           },
           // @ts-expect-error
           $: typeof Bun === "undefined" ? undefined : Bun.$,
+          sessionEnv: (options: { sessionID: string; cwd?: string }) =>
+            bridge.promise(
+              trigger(
+                "shell.env",
+                { cwd: options.cwd ?? ctx.directory, sessionID: options.sessionID },
+                { env: {} as Record<string, string> },
+              ).pipe(Effect.map((result) => result.env)),
+            ),
         }
 
         for (const plugin of flags.disableDefaultPlugins ? [] : internalPlugins(flags)) {
